@@ -21,7 +21,7 @@ It works with normal coasters: no park script and no changes to the park file. T
 | `client/nl2bridge_client.py` | Command-line tool for quick tests |
 | `client/nl2_viewer.py` | Read-only live block and train viewer |
 | `controller/` | The NL2 Ride Control Panel (Python/tkinter) |
-| `examples/` | Small Python and Node.js programs |
+| `examples/` | Small Python and Node.js programs, plus an Arduino ride control panel (sketch, library and USB serial gateway) |
 | `scriptbuilder/sb_io.py` | Work in progress: joystick / keyboard / Arduino (serial) / Modbus TCP inputs and lamp outputs for physical panels |
 | `docs/` | [API guide](docs/API.md), [wire protocol](docs/PROTOCOL.md), [control panel](docs/CONTROLLER.md), [reverse-engineering notes](docs/RE_NOTES.md) |
 
@@ -66,6 +66,7 @@ with NL2Bridge("127.0.0.1", 15152) as nl:
 - [docs/API.md](docs/API.md): concepts (block modes, what works when), full Python reference and recipes.
 - [docs/PROTOCOL.md](docs/PROTOCOL.md): the binary protocol for any language (C#, C++, Node.js, a PLC with TCP sockets, ...). It uses the same framing as NoLimits 2's official telemetry server.
 - [examples/](examples/): monitor, dispatch cycle, lift stop/start and a Node.js client.
+- [examples/arduino/](examples/arduino/): build a physical panel with an Arduino. It includes a library with every API call, an example panel for an Uno (dispatch, gates, restraints, single-row release, E-stop/reset, lift start/stop, manual mode, transfer, advance, lamps) and a USB serial gateway.
 - [controller/](controller/): a complete ride controller. `ride_logic.py` is the best example of a real program against the API.
 
 ## The NL2 Ride Control Panel

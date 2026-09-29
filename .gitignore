@@ -1,0 +1,25 @@
+# build output (binaries are published as GitHub releases)
+build/
+dist/
+*.dll
+*.exe
+*.log
+*.port
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+
+# local state written by the tools
+controller/settings.json
+controller/stats.json
+controller/rides/
+client/viewer_layout.json
+client/viewer_err.txt
+client/op.py
+client/op_log.txt
+*.bak
+
+# private notes
+docs/private/

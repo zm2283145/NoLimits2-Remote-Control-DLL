@@ -11,7 +11,8 @@ only what changed. The line protocol is documented in README.md next to this fil
     python serial_gateway.py --console                  # no Arduino: type the commands yourself to test
 
 On exit (Ctrl+C) it hands the ride back: lift/transport speeds it changed are restored, stations it put in
-manual dispatch go back to automatic, and an E-stop it set is cleared (use --no-restore to skip).
+manual dispatch go back to automatic, an E-stop it set is cleared, and a coaster it put in manual block mode
+goes back to automatic once all trains have stopped on blocks (use --no-restore to skip).
 """
 import argparse, os, queue, re, sys, threading, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "client"))
@@ -145,7 +146,7 @@ class Gateway:
         self.watch, self.rate = set(), 0.1
         self.next_poll = self.next_names = 0.0
         self.names = {"blk": {}, "stn": {}, "sw": {}, "sen": {}}
-        self.restore, self.manual_stations, self.estop_set = {}, set(), False
+        self.restore, self.manual_stations, self.estop_set, self.manual_mode = {}, set(), False, set()
         self.reset_cache()
 
     # ------------------------------------------------------------------ plumbing
@@ -388,7 +389,12 @@ class Gateway:
 
     # coaster
     def cmd_MODE(self, mode):
-        self.nl.set_block_mode(self.c, str(mode).lower())
+        mode = str(mode).lower()
+        self.nl.set_block_mode(self.c, mode)
+        if mode == "auto":
+            self.manual_mode.discard(self.c)
+        else:
+            self.manual_mode.add(self.c)
 
     def cmd_ESTOP(self, on):
         on = onoff(on)
@@ -513,6 +519,25 @@ class Gateway:
             self._try(f"Station {st} back to automatic dispatch", self.nl.set_manual_dispatch, c, st, False)
         if self.estop_set:
             self._try("Release E-stop", self.nl.estop, self.c, False)
+        for c in self.manual_mode:
+            # the game only leaves manual block mode once every train has stopped on a block section
+            deadline, err, told = time.time() + 120, None, False
+            while time.time() < deadline:
+                try:
+                    self.nl.set_block_mode(c, "auto")
+                    log(f"Coaster {c} back to automatic block mode")
+                    break
+                except NL2Error as e:
+                    err = e
+                    if not told:
+                        log(f"Waiting for trains to stop before returning coaster {c} to automatic mode ({e})...")
+                        told = True
+                    time.sleep(1)
+                except OSError as e:
+                    log(f"Coaster {c} back to automatic block mode failed: {e}")
+                    break
+            else:
+                log(f"Coaster {c} back to automatic block mode failed: {err}")
 
     def _try(self, what, fn, *args):
         try:
@@ -531,7 +556,7 @@ def main():
     ap.add_argument("--coaster", default="0", help="coaster index or name (default 0)")
     ap.add_argument("--console", action="store_true", help="read commands from the keyboard instead of serial")
     ap.add_argument("--log", action="store_true", help="print every line sent and received")
-    ap.add_argument("--no-restore", action="store_true", help="leave speeds / dispatch / E-stop as they are on exit")
+    ap.add_argument("--no-restore", action="store_true", help="leave speeds / dispatch / E-stop / block mode as they are on exit")
     a = ap.parse_args()
     if not a.console and not a.serial:
         ap.error("give the Arduino's serial port (e.g. COM5) or --console")

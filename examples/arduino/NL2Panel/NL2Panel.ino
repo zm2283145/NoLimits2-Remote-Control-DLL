@@ -14,7 +14,7 @@
 //   A0  ROW SELECT         10k pot (ends to 5V/GND, wiper to A0)
 //   A1  ROW RELEASE        push button (opens / closes the selected row)
 //   A2  MANUAL             key switch (on = Manual Block mode, off = Auto)
-//   A3  TRANSFER           key switch (on = transfer table to position 1, off = position 0; needs MANUAL)
+//   A3  TRANSFER           key switch (on = table to the storage position, off = main line; needs MANUAL)
 //   A4  STATION OCCUPIED lamp  (output)
 //   A5  ADVANCE            push button (advances the waiting block; hold RESET too = advance backwards)
 //   Hold RESET 3 seconds = simulator reset (trains back to their start positions).
@@ -27,7 +27,9 @@
 #define STATION          0            // station number (0 = first station of the coaster)
 #define STATION_BLOCK    "Station"    // section shown on the STATION OCCUPIED lamp
 #define LIFT_BLOCK       "Lift"       // lift section switched by LIFT START/STOP ("" = no lift button)
-#define TRANSFER_TRACK   "Transfer"   // special track moved by the TRANSFER key ("" = no transfer)
+#define TRANSFER_TRACK   0            // transfer table: special track number (0 = first) or its name in quotes
+#define TRANSFER_MAIN    3            // table position that lines up with the main track (see SWITCHES / the editor)
+#define TRANSFER_STORAGE 0            // table position for the storage track; -1 = no TRANSFER key
 #define DEFAULT_ROWS     8            // rows on the knob until the game reports the real count
 #define LIFT_ON_AT_START false        // true = lift chain runs as soon as the panel connects
 
@@ -147,8 +149,9 @@ void buttons() {
     if (back ? nBwd : nFwd) nl2.advance(back ? waitBwd[0] : waitFwd[0], back); else errorUntil = millis() + 800;
   }
   if (keyManual.changed()) { nl2.blockMode(keyManual.on ? "manual" : "auto"); lastModeTry = millis(); }
-  if (keyTransfer.changed() && *TRANSFER_TRACK) {
-    if (keyManual.on) nl2.setSwitch(TRANSFER_TRACK, keyTransfer.on ? 1 : 0); else errorUntil = millis() + 800;
+  if (keyTransfer.changed() && TRANSFER_STORAGE >= 0) {
+    if (keyManual.on) nl2.setSwitch(TRANSFER_TRACK, keyTransfer.on ? TRANSFER_STORAGE : TRANSFER_MAIN);
+    else errorUntil = millis() + 800;
   }
 
   // RESET: tap = clear the E-stop (circuit must be closed again), hold 3 s = simulator reset

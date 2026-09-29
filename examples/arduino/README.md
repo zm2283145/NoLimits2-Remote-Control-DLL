@@ -29,7 +29,7 @@ All NL2Bridge features are available from the Arduino:
 ## Quick start
 
 1. Open `NL2Panel/NL2Panel.ino` in the Arduino IDE.
-2. Set the names at the top to match your ride's sections in the NoLimits 2 editor: station, lift, transfer track.
+2. Set the config at the top to match your ride's sections in the NoLimits 2 editor: station, lift, and the transfer table. For the transfer, give the special track number (run `SWITCHES` in console mode to list them) and the table positions for the main line and the storage track.
 3. Upload the sketch.
 4. Start NoLimits 2, open the park and inject NL2Bridge (`NL2BridgeInjector.exe`).
 5. Run the gateway with the Arduino's COM port. You can find it in the Arduino IDE under Tools → Port.
@@ -41,7 +41,7 @@ All NL2Bridge features are available from the Arduino:
    ```
 6. The COMM lamp (the on-board LED) turns solid when the panel is linked to the game. From then on, the station is in manual dispatch and the panel's DISPATCH button runs it.
 
-Stop the gateway with Ctrl+C to hand the ride back. It restores any lift or transport speeds it changed, puts stations back into automatic dispatch and releases an E-stop it set. Use `--no-restore` to skip this.
+Stop the gateway with Ctrl+C to hand the ride back. It restores any lift or transport speeds it changed, puts stations back into automatic dispatch, releases an E-stop it set, and returns the coaster to automatic block mode if the panel switched it to manual. The game only accepts that switch once every train has stopped on a block, so the gateway may wait up to 2 minutes, for example while a train finishes a lift. Use `--no-restore` to skip all of this.
 
 The Arduino IDE's Serial Monitor and the gateway can't use the COM port at the same time. Close the monitor before you run the gateway.
 
@@ -62,7 +62,7 @@ Connect each button and key switch between its pin and GND; the sketch uses the 
 | A0 | ROW SELECT: 10 kΩ pot, wiper to A0 | A4 | STATION OCCUPIED |
 | A1 | ROW RELEASE: opens or closes the selected row | | |
 | A2 | MANUAL key switch (Manual Block / Auto) | | |
-| A3 | TRANSFER key switch (table position 1 / 0, needs MANUAL) | | |
+| A3 | TRANSFER key switch (table to the storage / main position, needs MANUAL) | | |
 | A5 | ADVANCE: advances the block waiting for it; hold RESET too to advance backwards | | |
 
 The E-stop contact is normally closed. Opening the circuit, whether by pressing the mushroom or through a broken wire, stops the ride. After releasing the mushroom, RESET clears the stop.

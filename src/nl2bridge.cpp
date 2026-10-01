@@ -256,11 +256,14 @@ enum : uint32_t {
   SF_ROWS_OPEN = 1u << 24,   // rows opened individually (restraints.inc): harness not closed, dispatch blocked
 };
 static int RowsNotClosed(uint8_t* tr);   // restraints.inc
+struct TrainSeats { int seats = 0, cars = 0, maxPerCar = 0; };   // cars = cars that carry seats
+static TrainSeats GetTrainSeats(uint8_t* tr);   // restraints.inc
 struct StationStatus {
   uint32_t flags = 0; uint8_t state = 0;
   double gates = -1, platform = -1; float harness = -1, flyer = -1;   // positions, -1 = n/a
   bool gatesOpening = false, gatesClosing = false, platformMoving = false, harnessMoving = false, flyerMoving = false;
   int rowsOpen = 0;
+  TrainSeats seats;   // capacity of the train currently in the station (0 when empty)
 };
 static StationStatus GetStationStatus(uint8_t* c, uint8_t* st) {   // requires lock
   StationStatus s;
@@ -297,6 +300,7 @@ static StationStatus GetStationStatus(uint8_t* c, uint8_t* st) {   // requires l
   if (uint8_t* f = sec ? Rd<uint8_t*>(sec, section::FlyerDev) : nullptr)
     if (Rd<uint8_t>(st, station::HasFlyer) && (!G.DeviceActive || G.DeviceActive(f))) s.flags |= SF_HAS_FLYER;
   if (tr) {
+    s.seats = GetTrainSeats(tr);
     s.harness = Rd<float>(tr, train::HarnessPos);
     uint8_t hm = Rd<uint8_t>(tr, train::HarnessMotion);
     s.harnessMoving = hm == 1 || hm == 2;
@@ -387,12 +391,14 @@ static std::string TrainsJson(uint8_t* c) {
     for (int k = 0; k < nst; ++k) if (se[k].station && Rd<uint8_t*>(se[k].station, station::Train) == t) station = k;
     std::string secs;
     for (size_t k = 0; k < ne; ++k) if (idx < 32 && (masks[k] >> idx) & 1) { if (!secs.empty()) secs += ","; secs += std::to_string(e[k].id); }
+    TrainSeats ts = GetTrainSeats(t);
     char buf[1024];
     snprintf(buf, sizeof buf, "%s{\"index\":%d,\"blockId\":%u,\"blockName\":\"%s\",\"sections\":[%s],\"station\":%d,"
+             "\"seats\":%d,\"seatedCars\":%d,\"seatsPerCar\":%d,"
              "\"speed\":%.3f,\"accel\":%.3f,\"harness\":%.3f,\"flyer\":%.3f,\"lashed\":%d,"
              "\"front\":{\"track\":%d,\"pos\":%.3f},\"center\":{\"track\":%d,\"pos\":%.3f},\"rear\":{\"track\":%d,\"pos\":%.3f}}",
              i ? "," : "", idx, hs ? Rd<uint32_t>(hs, section::Id) : 0, JsonEsc(hs ? ReadStdString(hs + section::Name) : "").c_str(),
-             secs.c_str(), station, Rd<double>(t, train::Speed), Rd<double>(t, train::Accel),
+             secs.c_str(), station, ts.seats, ts.cars, ts.maxPerCar, Rd<double>(t, train::Speed), Rd<double>(t, train::Accel),
              (double)Rd<float>(t, train::HarnessPos), (double)Rd<float>(t, train::FlyerPos), Rd<uint8_t>(t, train::Lashed),
              TrackIndex(c, Rd<void*>(t, train::FrontTrack)), Rd<double>(t, train::FrontPos),
              TrackIndex(c, Rd<void*>(t, train::CenterTrack)), Rd<double>(t, train::CenterPos),
@@ -461,13 +467,16 @@ static std::string StationsJson(uint8_t* c) {
     char buf[1536];
     snprintf(buf, sizeof buf,
       "%s{\"index\":%d,\"name\":\"%s\",\"sectionId\":%u,\"flags\":%u,\"state\":%u,\"manualDispatch\":%d,\"hasTrain\":%d,"
+      "\"train\":%d,\"seats\":%d,\"seatedCars\":%d,\"seatsPerCar\":%d,"
       "\"trainReady\":%d,\"canDispatch\":%d,\"waitingForClearBlock\":%d,\"waitingForAdvance\":%d,"
       "\"gates\":{\"present\":%d,\"position\":%.3f,\"open\":%d,\"closed\":%d,\"opening\":%d,\"closing\":%d,\"canOpen\":%d,\"canClose\":%d},"
       "\"harness\":{\"position\":%.3f,\"open\":%d,\"closed\":%d,\"moving\":%d,\"canOpen\":%d,\"canClose\":%d,\"rowsOpen\":%d},"
       "\"platform\":{\"present\":%d,\"position\":%.3f,\"raised\":%d,\"lowered\":%d,\"moving\":%d,\"canRaise\":%d,\"canLower\":%d},"
       "\"flyer\":{\"present\":%d,\"position\":%.3f,\"locked\":%d,\"unlocked\":%d,\"moving\":%d,\"canLock\":%d,\"canUnlock\":%d}}",
       i ? "," : "", i, JsonEsc(sec ? ReadStdString(sec + section::Name) : "").c_str(), sec ? Rd<uint32_t>(sec, section::Id) : 0,
-      s.flags, s.state, b(SF_MANUAL), b(SF_HAS_TRAIN), b(SF_TRAIN_READY), b(SF_CAN_DISPATCH),
+      s.flags, s.state, b(SF_MANUAL), b(SF_HAS_TRAIN),
+      se[i].station && Rd<uint8_t*>(st, station::Train) ? (int)Rd<uint8_t>(Rd<uint8_t*>(st, station::Train), train::Index) : -1,
+      s.seats.seats, s.seats.cars, s.seats.maxPerCar, b(SF_TRAIN_READY), b(SF_CAN_DISPATCH),
       s.state == 0x12 || s.state == 0x15, s.state == 0x14 || s.state == 0x17,
       b(SF_HAS_GATES), s.gates, b(SF_GATES_OPEN), b(SF_GATES_CLOSED), s.gatesOpening, s.gatesClosing, b(SF_CAN_OPEN_GATES), b(SF_CAN_CLOSE_GATES),
       (double)s.harness, b(SF_HARNESS_OPEN), b(SF_HARNESS_CLOSED), s.harnessMoving, b(SF_CAN_OPEN_HARNESS), b(SF_CAN_CLOSE_HARNESS), s.rowsOpen,
@@ -516,7 +525,7 @@ enum : uint16_t {
   Q_GET_BLOCK_STATES  = 1210,   // i32 coaster -> R_BLOCK_STATES
   R_BLOCK_STATES      = 1211,   // u8 mode, u8 estop, u16 count, then per section 16 bytes (see README)
   Q_GET_STATION_STATES= 1212,   // i32 coaster -> R_STATION_STATES
-  R_STATION_STATES    = 1213,   // u16 count, then per station: u32 flags, u8 state, u8 0, u16 0
+  R_STATION_STATES    = 1213,   // u16 count, then per station: u32 flags, u8 state, u8 rowsOpen, u16 seats (train in station)
   Q_GET_SWITCH_STATES = 1214,   // i32 coaster -> R_SWITCH_STATES
   R_SWITCH_STATES     = 1215,   // u16 count, then per special track: i8 current, i8 target, u8 directions, u8 flags
   Q_GET_SECTION_DETAIL= 1216,   // i32 coaster -> R_SECTION_DETAIL (train-position flags for block logic)
@@ -596,7 +605,7 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
   case Q_PING: return R_OK;
 
   case Q_BRIDGE_INFO:
-    w.str("{\"name\":\"NL2Bridge\",\"api\":6,\"build\":\"1.0.0\"}");
+    w.str("{\"name\":\"NL2Bridge\",\"api\":7,\"build\":\"1.1.0\"}");
     return R_STRING;
 
   case Q_DEVICE_PARAMS_GET: {
@@ -678,7 +687,7 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
     w.u16((uint16_t)n);
     for (int i = 0; i < n; ++i) {
       StationStatus s; if (se[i].station) s = GetStationStatus(c, se[i].station);
-      w.u32(s.flags); w.u8(s.state); w.u8((uint8_t)s.rowsOpen); w.u16(0);
+      w.u32(s.flags); w.u8(s.state); w.u8((uint8_t)s.rowsOpen); w.u16((uint16_t)s.seats.seats);
     }
     return R_STATION_STATES;
   }
@@ -1084,7 +1093,7 @@ static DWORD WINAPI InitThread(LPVOID self) {
   if (FILE* pf = _wfopen(path, L"r")) { int p = 0; if (fscanf(pf, "%d", &p) == 1 && p > 0 && p < 65536) g_port = p; fclose(pf); }
   wcscpy(dot, L".log");
   g_log = _wfopen(path, L"a");
-  Log("NL2Bridge 1.0.0 starting (API 6), port %d", g_port);
+  Log("NL2Bridge 1.1.0 starting (API 7), port %d", g_port);
   ResolveAll();
   Log(G.ok ? "all symbols resolved" : "WARNING: some symbols missing - requests will be refused");
   InitSensors(G.sensorSyms);

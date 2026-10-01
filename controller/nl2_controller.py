@@ -719,7 +719,8 @@ class Panel:
                 ro, rm = not rs[i]["closed"], rs[i]["opening"] or rs[i]["closing"]
             else:
                 ro, rm = h_open, h_moving
-            for j in range(seats):
+            ns = max(1, min(6, int(rs[i].get("seats") or seats))) if i < len(rs) else seats
+            for j in range(ns):
                 y = 657 + j * pitch
                 self._seat(x, y, pitch, has, ro, rm and int(t * 6) % 2, rsc)
         # left buttons

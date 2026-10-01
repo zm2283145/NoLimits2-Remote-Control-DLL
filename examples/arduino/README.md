@@ -182,7 +182,8 @@ Any device that can write a serial line can use this protocol, not only an Ardui
 | `SEN` | `<key> <active> <lastTrain (-1 none)> <passes> <name>` |
 | `TRN` | `<index> <blockId> <station (-1)> <speed m/s> <harness 0..1> <blockName>` |
 | `ROWS` | `<station> <rowCount> <openCount>` (count 0 = no train) |
-| `ROW` | `<station> <row> <open 0/1> <position %>` |
+| `ROW` | `<station> <row> <open 0/1> <position %> <seats>` |
+| `SEATS` | `<station> <train (-1 none)> <seats> <seatedCars> <seatsPerCar>`: capacity of the train in the station, sent with the `stations` watch when the train changes (API 7+). Seats come from the car model, so a train drawn by a park script reads 0. Callback: `onSeats` |
 | `EVT` | `<type> <sensorKey or sectionId> <train> <name>`, where type is `sensorEnter`, `sensorLeave`, `modeAuto`, `modeManualBlock`, `modeFullManual`, `advanceFwdPressed` or `advanceBwdPressed` |
 | `DET` | `<id> <flags hex> <trainIndex> <state> <userState> <liftSpeed> <transportSpeed>` |
 | `PARAM` | `<blockId> <lift\|transport> <speed> <accel> <decel> <current> <name>` |

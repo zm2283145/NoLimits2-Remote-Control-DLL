@@ -131,7 +131,7 @@ struct NL2Switch {
 };
 struct NL2Sensor { long key; bool active; int lastTrain; unsigned long passes; const char* name; };
 struct NL2Train  { int index; long blockId; int station; float speed, harness; const char* blockName; };
-struct NL2Row    { int station, row; bool open; uint8_t position; };                  // position 0..100 % open
+struct NL2Row    { int station, row; bool open; uint8_t position; int seats; };  // position 0..100 % open
 struct NL2Event  { const char* type; long id; int train; const char* name; };
 struct NL2Detail {
   long id; uint16_t flags; int trainIndex; uint8_t state; long userState; float liftSpeed, transportSpeed;
@@ -154,6 +154,8 @@ public:
   void (*onSensor)(const NL2Sensor&) = nullptr;
   void (*onTrain)(const NL2Train&) = nullptr;
   void (*onRows)(int station, int count, int openCount) = nullptr;
+  // seat capacity of the train in a station (train -1 / seats 0 = empty, or a script-drawn train)
+  void (*onSeats)(int station, int train, int seats, int seatedCars, int seatsPerCar) = nullptr;
   void (*onRow)(const NL2Row&) = nullptr;
   void (*onEvent)(const NL2Event&) = nullptr;
   void (*onDetail)(const NL2Detail&) = nullptr;
@@ -317,10 +319,13 @@ private:
       w.name = rest(p); onSwitch(w);
     } else if (!strcmp(t, "ROW")) {
       if (!onRow) return;
-      NL2Row r; r.station = ni(p); r.row = ni(p); r.open = ni(p); r.position = ni(p); onRow(r);
+      NL2Row r; r.station = ni(p); r.row = ni(p); r.open = ni(p); r.position = ni(p); r.seats = ni(p); onRow(r);
     } else if (!strcmp(t, "ROWS")) {
       int st = ni(p), n = ni(p), o = ni(p);
       if (onRows) onRows(st, n, o);
+    } else if (!strcmp(t, "SEATS")) {
+      int st = ni(p), tr = ni(p), n = ni(p), cars = ni(p), per = ni(p);
+      if (onSeats) onSeats(st, tr, n, cars, per);
     } else if (!strcmp(t, "TRN")) {
       if (!onTrain) return;
       NL2Train r; r.index = ni(p); r.blockId = ni(p); r.station = ni(p); r.speed = nf(p); r.harness = nf(p);

@@ -136,7 +136,7 @@ class NL2Bridge:
         return self.call(1000)[0] == R_OK
 
     def bridge_info(self):
-        """{name, api, build} (API 6+). Older bridges answer 'Unknown message' -> {'api': 0}."""
+        """{name, api, build} (API 6+; 7 = seat capacity). Older bridges answer 'Unknown message' -> {'api': 0}."""
         try:
             return self._json(1001)
         except NL2Error:
@@ -187,6 +187,8 @@ class NL2Bridge:
         return BLOCK_MODE_NAMES.get(mode, mode), bool(estop), out
 
     def stations(self, c):
+        """Every station: name, state, hasTrain, train (index or -1), seats / seatedCars / seatsPerCar of that
+        train (API 7+), gates, harness, floor, flyer, ..."""
         return self._json(1203, struct.pack(">i", self._c(c)))
 
     def station_status(self, c, station):
@@ -194,13 +196,16 @@ class NL2Bridge:
         return self._pick(self.stations(c), station, "name", "station")
 
     def station_states(self, c):
-        """Fast binary poll of all stations: list of dicts of booleans (+ raw 'flags' and 'state')."""
+        """Fast binary poll of all stations: list of dicts of booleans (+ raw 'flags', 'state', 'rowsOpenCount'
+        and 'seats' = seat capacity of the train in the station, 0 if none / unknown; API 7+)."""
         _, b = self.call(1212, struct.pack(">i", self._c(c)))
         n = struct.unpack(">H", b[:2])[0]
         out = []
         for i in range(n):
-            flags, state, rows_open = struct.unpack(">IBB", b[2 + i * 8:8 + i * 8])
-            d = _flags(flags, STATION_FLAGS); d.update(index=i, flags=flags, state=state, rowsOpenCount=rows_open); out.append(d)
+            flags, state, rows_open, seats = struct.unpack(">IBBH", b[2 + i * 8:10 + i * 8])
+            d = _flags(flags, STATION_FLAGS)
+            d.update(index=i, flags=flags, state=state, rowsOpenCount=rows_open, seats=seats)
+            out.append(d)
         return out
 
     def special_tracks(self, c):
@@ -240,7 +245,8 @@ class NL2Bridge:
 
     def trains(self, c):
         """Every train: index, blockId/blockName holding it, sections it occupies, station index (-1),
-        speed (m/s), accel, harness/flyer position and front/center/rear {track, pos} along the track."""
+        speed (m/s), accel, harness/flyer position, front/center/rear {track, pos} along the track and
+        seats / seatedCars / seatsPerCar (API 7+; 0 when the trains are drawn by a script, not an NL2 car model)."""
         return self._json(1205, struct.pack(">i", self._c(c)))
 
     def section_detail(self, c):
@@ -376,10 +382,18 @@ class NL2Bridge:
     # ---------------------------------------------------------------- per-row restraints (API v4)
     def rows(self, c, station):
         """Per-row restraint state of the train in a station: {rows:[{row, position, open, closed, ...}], rowsOpen, ...}.
-        Row 1 is the front car; only cars with restraints count."""
+        Row 1 is the front car; only cars with restraints count. API 7+ adds seats per row and per car,
+        plus top-level seats / seatedCars."""
         c = self._c(c)
         si = station if isinstance(station, int) else self.station_index(c, station)
         return self._json(1206, struct.pack(">ii", c, si))
+
+    def station_seats(self, c, station):
+        """Seat capacity of the train in a station (API 7+): {train, seats, seatedCars, seatsPerCar}.
+        train is -1 and seats 0 when the station is empty. Seats are the car model's HEAD nodes, so trains
+        drawn by a script on top of an invisible NL2 train report 0."""
+        s = self.station_status(c, station)
+        return {k: s.get(k, -1 if k == "train" else 0) for k in ("train", "seats", "seatedCars", "seatsPerCar")}
 
     def set_row_restraint(self, c, station, row, open_):
         """Open (True) or close (False) one row's restraints (row 1 = front, 0 = every row).

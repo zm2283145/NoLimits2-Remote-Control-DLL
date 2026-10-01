@@ -222,6 +222,8 @@ namespace train {
 namespace car {
   constexpr int Train       = 0x20;              // NLTrain*
   constexpr int AnimBegin   = 0x28, AnimEnd = 0x30;  // restraint animation groups (0x28 bytes: {nodes vector, .., scale, cache})
+  constexpr int SeatsBegin  = 0x40, SeatsEnd = 0x48; // std::vector<Seat*>: one entry per seat (rider camera). Train::SeatedCarCount
+                                                     // (0x140497de0) and the "%s (Train %d, Car %d, Seat %d)" camera list use it
   constexpr int NodesBegin  = 0x58, NodesEnd = 0x60; // restraint nodes animated directly
   constexpr int Offset      = 0x1d0;             // double (steering gears): -(distance behind the train front)
 }

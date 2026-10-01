@@ -156,7 +156,7 @@ class Gateway:
         self.link.write(text)
 
     def reset_cache(self):
-        self.cache = {k: {} for k in ("mode", "blk", "stn", "sw", "sen", "trn", "rows", "row", "det")}
+        self.cache = {k: {} for k in ("mode", "blk", "stn", "seats", "sw", "sen", "trn", "rows", "row", "det")}
         self.ev_seq = None
 
     def connect(self):
@@ -164,8 +164,9 @@ class Gateway:
         try:
             nl = NL2Bridge(self.a.host, self.a.port, timeout=3.0)
             info = nl.bridge_info()
-            if info.get("api", 0) < 6:
-                log(f"Warning: bridge API {info.get('api')} - this gateway expects API 6 (NL2Bridge 1.0.0+)")
+            if info.get("api", 0) < 7:
+                log(f"Warning: bridge API {info.get('api')} - this gateway expects API 7 (NL2Bridge 1.1.0+);"
+                    " seat counts read 0")
             self.nl, self.info = nl, info
             key = int(self.a.coaster) if str(self.a.coaster).lstrip("-").isdigit() else self.a.coaster
             self.select(key)
@@ -241,10 +242,17 @@ class Gateway:
                     self.push("blk", b["id"], v, f"BLK {b['id']} " + " ".join(map(str, v)) + " "
                               + self.name("blk", b["id"]), force)
         if "stations" in w:
-            for s in nl.station_states(c):
+            sts, full = nl.station_states(c), None
+            for s in sts:
                 v = (s["flags"], s["state"], s["rowsOpenCount"])
                 self.push("stn", s["index"], v, f"STN {s['index']} {s['flags']:08X} {s['state']} {s['rowsOpenCount']} "
                           + self.name("stn", s["index"]), force)
+                key = (s["hasTrain"], s.get("seats", 0))
+                if force or self.cache["seats"].get(s["index"], (None,))[0] != key:
+                    full = full or nl.stations(c)       # train index / cars only when the train changes
+                    j = full[s["index"]] if s["index"] < len(full) else {}
+                    v = (key, j.get("train", -1), j.get("seats", 0), j.get("seatedCars", 0), j.get("seatsPerCar", 0))
+                    self.push("seats", s["index"], v, f"SEATS {s['index']} " + " ".join(map(str, v[1:])), force)
         if "switches" in w:
             for t in nl.switch_states(c):
                 fl = t["moving"] | t["switchable"] << 1 | t["manualAllowed"] << 2 | t["transferTable"] << 3
@@ -285,8 +293,8 @@ class Gateway:
         n_open = sum(1 for r in rows if r.get("open"))
         self.push("rows", st, (len(rows), n_open), f"ROWS {st} {len(rows)} {n_open}", force)
         for r in rows:
-            v = (bool(r.get("open")), round((r.get("position") or 0) * 100))
-            self.push("row", (st, r["row"]), v, f"ROW {st} {r['row']} {int(v[0])} {v[1]}", force)
+            v = (bool(r.get("open")), round((r.get("position") or 0) * 100), r.get("seats", 0))
+            self.push("row", (st, r["row"]), v, f"ROW {st} {r['row']} {int(v[0])} {v[1]} {v[2]}", force)
 
     # ------------------------------------------------------------------ commands
     def handle(self, line):

@@ -1,4 +1,4 @@
-# NL2Bridge wire protocol (API 6)
+# NL2Bridge wire protocol (API 7)
 
 This is the reference for talking to NL2Bridge from any language. If you use Python, the ready-made client in `client/nl2bridge.py` already implements everything here (see [API.md](API.md)).
 
@@ -47,7 +47,7 @@ Look sections up **by name** at startup rather than hard-coding ids.
 | Id | Request | Reply |
 |---|---|---|
 | 1000 | – | OK (ping) |
-| 1001 | – | String JSON `{name, api, build}`. Require `api >= 6` for everything in this document. Bridges older than API 6 answer Error `Unknown message`. |
+| 1001 | – | String JSON `{name, api, build}`. Require `api >= 6` for everything in this document; seat counts (marked API 7) need `api >= 7`. Bridges older than API 6 answer Error `Unknown message`. |
 | 1200 | – | String JSON list of coasters: `index, name, operationMode (0 normal, 1 shuttle, 2 scripted), scripted, blockMode (1 auto, 2 manual block, 3 full manual), estop, ready, trains, sections, stations, specialTracks` |
 | 1204 | i32 coaster | String JSON `{coaster, sections, stations, specialTracks, tracks}` (the lists below in one reply). `tracks`: `[{index, class, start, end}]`; each end is `{special, port}` (joined to a switch/transfer table port), `{track}` or `null`. |
 
@@ -88,7 +88,7 @@ The position flags are the game's own `Section.isTrainBefore/Behind*` queries, t
 ### Trains
 | Id | Request | Reply |
 |---|---|---|
-| 1205 | i32 coaster | String JSON list: `index, blockId, blockName, sections[], station (-1), speed (m/s), accel, harness (0 closed..1 open), flyer, lashed, front/center/rear {track, pos}` |
+| 1205 | i32 coaster | String JSON list: `index, blockId, blockName, sections[], station (-1), speed (m/s), accel, harness (0 closed..1 open), flyer, lashed, front/center/rear {track, pos}, seats, seatedCars, seatsPerCar` (API 7) |
 | 1151 | i32 coaster, i32 train, i32 lashed (1/0) | OK. The train's "Lashed To Track" flag. The game only allows Auto/Manual block mode when every train on a storage track is lashed and no other train is. |
 
 ### Coaster-wide control
@@ -101,11 +101,11 @@ The position flags are the game's own `Section.isTrainBefore/Behind*` queries, t
 ### Stations
 | Id | Request | Reply |
 |---|---|---|
-| 1203 | i32 coaster | String JSON list: `index, name, sectionId, flags, state, manualDispatch, hasTrain, trainReady, canDispatch, waitingForClearBlock, waitingForAdvance` and objects `gates {present, position, open, closed, opening, closing, canOpen, canClose}`, `harness {position, open, closed, moving, canOpen, canClose, rowsOpen}`, `platform {present, position, raised, lowered, moving, canRaise, canLower}`, `flyer {present, position, locked, unlocked, moving, canLock, canUnlock}` |
-| 1212 | i32 coaster | **1213**: `u16 count`, then per station 8 bytes: `u32 flags, u8 state, u8 rowsOpenCount, u16 0` |
+| 1203 | i32 coaster | String JSON list: `index, name, sectionId, flags, state, manualDispatch, hasTrain, train (-1), seats, seatedCars, seatsPerCar, trainReady, canDispatch, waitingForClearBlock, waitingForAdvance` and objects `gates {present, position, open, closed, opening, closing, canOpen, canClose}`, `harness {position, open, closed, moving, canOpen, canClose, rowsOpen}`, `platform {present, position, raised, lowered, moving, canRaise, canLower}`, `flyer {present, position, locked, unlocked, moving, canLock, canUnlock}`. `train`, `seats`, `seatedCars` and `seatsPerCar` are API 7. |
+| 1212 | i32 coaster | **1213**: `u16 count`, then per station 8 bytes: `u32 flags, u8 state, u8 rowsOpenCount, u16 seats` (seat capacity of the train in the station, 0 if empty; API 7, 0 before) |
 | 1141 | i32 coaster, i32 station, i32 op | OK, or Error with the reason the game refused (recommended) |
 | 1140 | i32 coaster, i32 station, i32 op | Int 1/0 (unchecked, no reason) |
-| 1206 | i32 coaster, i32 station | String JSON per-row restraints of the train in the station: `{enabled, station, hasTrain, train, trainHarness, trainMotion, rowsOpen, rows:[{row, position, open, closed, opening, closing, individual}], cars:[...]}`. Row 1 is the front row. |
+| 1206 | i32 coaster, i32 station | String JSON per-row restraints of the train in the station: `{enabled, station, hasTrain, train, trainHarness, trainMotion, rowsOpen, seats, seatedCars, rows:[{row, position, open, closed, opening, closing, individual, seats}], cars:[{..., seats}]}`. Row 1 is the front row. `seats` fields are API 7. |
 | 1142 | i32 coaster, i32 station, i32 row (1-based, 0 = all), i32 open (1/0) | OK or Error. Open or close one row's restraints. |
 
 Station ops:
@@ -121,6 +121,8 @@ Station ops:
 Ops 2–10 need the station in manual dispatch mode and a train stopped in it, exactly like the in-game buttons, and the game refuses unsafe moves. **In Full Manual block mode the game refuses every station op**; run in Manual Block mode.
 
 While any single row is open (1142), the bridge refuses dispatch, and "harness close" (op 6) also closes the open rows.
+
+Seat capacity (API 7) is counted from the train's car models: each seat is a `HEAD` node in a car's model, the same list the game uses for on-ride seat cameras. `seats` is the train total, `seatedCars` the cars that have seats (a front car or locomotive without seats is not counted) and `seatsPerCar` the largest car. A park whose trains are drawn by a script on top of an invisible NL2 train has no car models to count, so it reports 0 seats and has no per-row restraints.
 
 Station flags (1213 and `flags` in 1203); bits 0–10 match the official telemetry station state:
 ```

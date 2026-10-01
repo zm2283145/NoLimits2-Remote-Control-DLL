@@ -78,7 +78,7 @@ static void InitRows() {
 }
 
 // ---- car enumeration (caller holds the game lock) -------------------------------------------------
-struct CarInfo { uint8_t* car; double offset; int nodes, groups; bool gear; };   // gear = steering gear (+0x450 list)
+struct CarInfo { uint8_t* car; double offset; int nodes, groups, seats; bool gear; };   // gear = steering gear (+0x450 list)
 
 static void EnumCars(uint8_t* tr, std::vector<CarInfo>& out) {
   for (int list = 0; list < 2; ++list) {
@@ -88,8 +88,10 @@ static void EnumCars(uint8_t* tr, std::vector<CarInfo>& out) {
     for (uint8_t* p = b; p < e; p += 0x10) {
       uint8_t* c = nullptr; void* back = nullptr;
       if (!SRd(p, 0, c) || !c || !SRd(c, car::Train, back) || back != tr) continue;
-      CarInfo ci{c, 0, 0, 0, list == 1};
+      CarInfo ci{c, 0, 0, 0, 0, list == 1};
       SRd(c, car::Offset, ci.offset);
+      uint8_t* sb = nullptr, *se = nullptr;
+      if (SRd(c, car::SeatsBegin, sb) && SRd(c, car::SeatsEnd, se) && sb && se > sb && se - sb < 8 * 256) ci.seats = (int)((se - sb) / 8);
       uint8_t* nb = nullptr, *ne = nullptr;
       if (SRd(c, car::NodesBegin, nb) && SRd(c, car::NodesEnd, ne) && nb && ne > nb) ci.nodes = (int)((ne - nb) / 8);
       uint8_t* gb = nullptr, *ge = nullptr;
@@ -108,6 +110,15 @@ static void EnumCars(uint8_t* tr, std::vector<CarInfo>& out) {
 static void TrainRowCars(uint8_t* tr, std::vector<CarInfo>& rows) {
   std::vector<CarInfo> all; EnumCars(tr, all);
   for (auto& c : all) if (c.nodes || c.groups) rows.push_back(c);
+}
+
+// Seat capacity of a train: total seats, and how many cars carry seats. Caller holds the game lock.
+static TrainSeats GetTrainSeats(uint8_t* tr) {
+  TrainSeats s;
+  if (!tr) return s;
+  std::vector<CarInfo> all; EnumCars(tr, all);
+  for (auto& c : all) if (c.seats > 0) { s.seats += c.seats; s.cars++; s.maxPerCar = std::max(s.maxPerCar, c.seats); }
+  return s;
 }
 
 // Drop overrides whose train/car no longer exists (park reload, train removed). Caller holds the game lock.
@@ -181,22 +192,24 @@ static std::string RowsJson(uint8_t* c, int si, uint8_t* st) {
   uint8_t* tr = Rd<uint8_t*>(st, station::Train);
   char buf[512];
   int ti = tr ? Rd<uint8_t>(tr, train::Index) : -1;
+  TrainSeats ts = GetTrainSeats(tr);
   snprintf(buf, sizeof buf, "{\"enabled\":%d,\"station\":%d,\"hasTrain\":%d,\"train\":%d,\"trainHarness\":%.3f,\"trainMotion\":%d,"
-           "\"rowsOpen\":%d,\"rows\":[", RW.ok ? 1 : 0, si, tr != nullptr, ti,
-           tr ? (double)Rd<float>(tr, train::HarnessPos) : -1.0, tr ? Rd<uint8_t>(tr, train::HarnessMotion) : 0, RowsNotClosed(tr));
+           "\"rowsOpen\":%d,\"seats\":%d,\"seatedCars\":%d,\"rows\":[", RW.ok ? 1 : 0, si, tr != nullptr, ti,
+           tr ? (double)Rd<float>(tr, train::HarnessPos) : -1.0, tr ? Rd<uint8_t>(tr, train::HarnessMotion) : 0, RowsNotClosed(tr),
+           ts.seats, ts.cars);
   std::string j = buf;
   std::vector<CarInfo> rows, all;
   if (tr) { TrainRowCars(tr, rows); EnumCars(tr, all); }
   for (size_t i = 0; i < rows.size(); ++i) {
     float pos; uint8_t m; bool over; RowState(tr, rows[i].car, pos, m, over);
-    snprintf(buf, sizeof buf, "%s{\"row\":%zu,\"position\":%.3f,\"open\":%d,\"closed\":%d,\"opening\":%d,\"closing\":%d,\"individual\":%d}",
-             i ? "," : "", i + 1, (double)pos, pos >= 1.0f && m != 1, pos <= 0.0f && m != 2, m == 2, m == 1, over);
+    snprintf(buf, sizeof buf, "%s{\"row\":%zu,\"position\":%.3f,\"open\":%d,\"closed\":%d,\"opening\":%d,\"closing\":%d,\"individual\":%d,\"seats\":%d}",
+             i ? "," : "", i + 1, (double)pos, pos >= 1.0f && m != 1, pos <= 0.0f && m != 2, m == 2, m == 1, over, rows[i].seats);
     j += buf;
   }
   j += "],\"cars\":[";
   for (size_t i = 0; i < all.size(); ++i) {
-    snprintf(buf, sizeof buf, "%s{\"type\":\"%s\",\"offset\":%.3f,\"nodes\":%d,\"groups\":%d,\"class\":\"%s\"}", i ? "," : "", all[i].gear ? "gear" : "car",
-             all[i].gear ? -all[i].offset : 0.0, all[i].nodes, all[i].groups, JsonEsc(RttiName(all[i].car)).c_str());
+    snprintf(buf, sizeof buf, "%s{\"type\":\"%s\",\"offset\":%.3f,\"nodes\":%d,\"groups\":%d,\"seats\":%d,\"class\":\"%s\"}", i ? "," : "", all[i].gear ? "gear" : "car",
+             all[i].gear ? -all[i].offset : 0.0, all[i].nodes, all[i].groups, all[i].seats, JsonEsc(RttiName(all[i].car)).c_str());
     j += buf;
   }
   return j + "]}";

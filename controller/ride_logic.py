@@ -946,6 +946,7 @@ class RideLogic:
         self.arrived = False
         self.rows_api = False
         self.n_rows = None
+        self.n_seats = None
         self.lift_beep_until = 0.0
         self.timer_run, self.timer_prev, self.timer_last = {}, {}, 0.0
         self.run_warn = (0.0, "")
@@ -1019,6 +1020,7 @@ class RideLogic:
         self.stats = RideStats(info["coaster"]["name"])
         self.prev_has = None
         self.n_rows = None
+        self.n_seats = None
         self.xgeo = transfer_geometry(info)
         self.xseq, self.dev_pending, self.full_manual = None, [], False
         self.game_auto_dispatch, self.disp_taken, self.next_disp_try = False, set(), 0.0
@@ -1038,6 +1040,16 @@ class RideLogic:
             return max(1, int(((self.cfg or {}).get("hmi") or {}).get("rows", 8)))
         except (TypeError, ValueError):
             return 8
+
+    def seat_capacity(self):
+        """Seats per train: read from the game (bridge API 7+), else rows x ride file hmi.seats_per_row.
+        Parks whose trains are drawn by a script on top of an invisible NL2 train report 0 seats."""
+        if self.n_seats:
+            return self.n_seats
+        try:
+            return self.row_count() * max(1, int(((self.cfg or {}).get("hmi") or {}).get("seats_per_row", 4)))
+        except (TypeError, ValueError):
+            return self.row_count() * 4
 
     def _save_cfg(self):
         if self.cfg and self.cfg_path and not self.cfg.get("broken"):
@@ -1538,6 +1550,8 @@ class RideLogic:
         rj = snap.get("rows") or {}
         if rj.get("hasTrain") and rj.get("rows"):
             self.n_rows = len(rj["rows"])          # every train of a coaster has the same cars
+        if rj.get("hasTrain") and rj.get("seats"):
+            self.n_seats = int(rj["seats"])        # seat capacity read from the game (bridge API 7+)
         with self.lock:
             self.lamps = lamps
             self.view = dict(
@@ -1552,7 +1566,7 @@ class RideLogic:
                 full_manual=self.full_manual, ad_held=ad_held, dispatch_ready=dispatch_ready,
                 adv_ready=adv_ready, layout=self.layout, hmi=hmi,
                 stats=self.stats.view(now) if self.stats else {}, timer=timer, parked_train=parked_train,
-                n_rows=self.row_count(), riders_cap=self.row_count() * int(hmi.get("seats_per_row", 4)),
+                n_rows=self.row_count(), riders_cap=self.seat_capacity(),
                 bc_states={b.sid: self.bc.state_text(b.sid) for b in self.bc.blocks} if self.bc else {},
                 bc_path=self.cfg_path, xseq=self._xfer_view(), xfer=self._xfer_options(snap, st),
                 reset_armed=now < self.reset_armed, nl2_minimized=self.nl2_minimized,
@@ -1615,7 +1629,7 @@ class RideLogic:
             if self.stats:
                 hmi = self.cfg["hmi"]
                 self.stats.add_riders({"add_riders": 5, "rider_up": 1, "rider_down": -1}[kind],
-                                      self.row_count() * int(hmi.get("seats_per_row", 4)))
+                                      self.seat_capacity())
             return
         if kind == "silence":
             self.silenced = True

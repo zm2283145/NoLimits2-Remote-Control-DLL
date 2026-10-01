@@ -78,7 +78,7 @@ static void InitRows() {
 }
 
 // ---- car enumeration (caller holds the game lock) -------------------------------------------------
-struct CarInfo { uint8_t* car; double offset; int nodes, groups, seats; bool gear; };   // gear = steering gear (+0x450 list)
+struct CarInfo { uint8_t* car; double offset; int nodes, groups, seats, models; bool gear; };   // gear = steering gear (+0x450 list)
 
 static void EnumCars(uint8_t* tr, std::vector<CarInfo>& out) {
   for (int list = 0; list < 2; ++list) {
@@ -88,8 +88,11 @@ static void EnumCars(uint8_t* tr, std::vector<CarInfo>& out) {
     for (uint8_t* p = b; p < e; p += 0x10) {
       uint8_t* c = nullptr; void* back = nullptr;
       if (!SRd(p, 0, c) || !c || !SRd(c, car::Train, back) || back != tr) continue;
-      CarInfo ci{c, 0, 0, 0, 0, list == 1};
+      CarInfo ci{c, 0, 0, 0, 0, 0, list == 1};
       SRd(c, car::Offset, ci.offset);
+      uint8_t* mb = nullptr, *me = nullptr;
+      if (SRd(c, car::ModelsBegin, mb) && SRd(c, car::ModelsEnd, me) && mb && me > mb && me - mb < 0x38 * 256)
+        ci.models = (int)((me - mb) / 0x38);
       uint8_t* sb = nullptr, *se = nullptr;
       if (SRd(c, car::SeatsBegin, sb) && SRd(c, car::SeatsEnd, se) && sb && se > sb && se - sb < 8 * 256) ci.seats = (int)((se - sb) / 8);
       uint8_t* nb = nullptr, *ne = nullptr;
@@ -112,12 +115,18 @@ static void TrainRowCars(uint8_t* tr, std::vector<CarInfo>& rows) {
   for (auto& c : all) if (c.nodes || c.groups) rows.push_back(c);
 }
 
-// Seat capacity of a train: total seats, and how many cars carry seats. Caller holds the game lock.
+// Seat capacity of a train: total seats, and how many cars carry seats. custom = the train has cars but none of
+// them has an NL2 car model (a park script draws the train). Caller holds the game lock.
 static TrainSeats GetTrainSeats(uint8_t* tr) {
   TrainSeats s;
   if (!tr) return s;
   std::vector<CarInfo> all; EnumCars(tr, all);
-  for (auto& c : all) if (c.seats > 0) { s.seats += c.seats; s.cars++; s.maxPerCar = std::max(s.maxPerCar, c.seats); }
+  bool model = false;
+  for (auto& c : all) {
+    if (c.models > 0) model = true;
+    if (c.seats > 0) { s.seats += c.seats; s.cars++; s.maxPerCar = std::max(s.maxPerCar, c.seats); }
+  }
+  s.custom = !all.empty() && !model;
   return s;
 }
 
@@ -194,9 +203,9 @@ static std::string RowsJson(uint8_t* c, int si, uint8_t* st) {
   int ti = tr ? Rd<uint8_t>(tr, train::Index) : -1;
   TrainSeats ts = GetTrainSeats(tr);
   snprintf(buf, sizeof buf, "{\"enabled\":%d,\"station\":%d,\"hasTrain\":%d,\"train\":%d,\"trainHarness\":%.3f,\"trainMotion\":%d,"
-           "\"rowsOpen\":%d,\"seats\":%d,\"seatedCars\":%d,\"rows\":[", RW.ok ? 1 : 0, si, tr != nullptr, ti,
+           "\"rowsOpen\":%d,\"seats\":%d,\"seatedCars\":%d,\"customTrain\":%d,\"rows\":[", RW.ok ? 1 : 0, si, tr != nullptr, ti,
            tr ? (double)Rd<float>(tr, train::HarnessPos) : -1.0, tr ? Rd<uint8_t>(tr, train::HarnessMotion) : 0, RowsNotClosed(tr),
-           ts.seats, ts.cars);
+           ts.seats, ts.cars, ts.custom);
   std::string j = buf;
   std::vector<CarInfo> rows, all;
   if (tr) { TrainRowCars(tr, rows); EnumCars(tr, all); }
@@ -208,8 +217,8 @@ static std::string RowsJson(uint8_t* c, int si, uint8_t* st) {
   }
   j += "],\"cars\":[";
   for (size_t i = 0; i < all.size(); ++i) {
-    snprintf(buf, sizeof buf, "%s{\"type\":\"%s\",\"offset\":%.3f,\"nodes\":%d,\"groups\":%d,\"seats\":%d,\"class\":\"%s\"}", i ? "," : "", all[i].gear ? "gear" : "car",
-             all[i].gear ? -all[i].offset : 0.0, all[i].nodes, all[i].groups, all[i].seats, JsonEsc(RttiName(all[i].car)).c_str());
+    snprintf(buf, sizeof buf, "%s{\"type\":\"%s\",\"offset\":%.3f,\"nodes\":%d,\"groups\":%d,\"seats\":%d,\"models\":%d,\"class\":\"%s\"}", i ? "," : "", all[i].gear ? "gear" : "car",
+             all[i].gear ? -all[i].offset : 0.0, all[i].nodes, all[i].groups, all[i].seats, all[i].models, JsonEsc(RttiName(all[i].car)).c_str());
     j += buf;
   }
   return j + "]}";

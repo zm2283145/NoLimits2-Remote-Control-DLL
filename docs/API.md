@@ -55,7 +55,7 @@ Connection problems raise `OSError` / `ConnectionError`. The game must be in pla
 ### Park and bridge
 | Method | Returns |
 |---|---|
-| `bridge_info()` | `{name, api, build}`; `api` is 0 for bridges older than API 6. Seat counts need API 7 (1.1.0) |
+| `bridge_info()` | `{name, api, build}`; `api` is 0 for bridges older than API 6. Seat counts need API 7 (1.1.0), `customTrain` API 8 (1.2.0) |
 | `ping()` | `True` |
 | `coasters()` | list of `{index, name, operationMode, scripted, blockMode, estop, ready, trains, sections, stations, specialTracks}` |
 | `coaster(key)` | coaster index |
@@ -68,7 +68,7 @@ Connection problems raise `OSError` / `ConnectionError`. The game must be in pla
 | `block(c, key)` | one section |
 | `block_states(c)` | fast binary poll: `(mode, estop, [ {id, state, stateName, trains, lamp, canAdvanceFwd, ...} ])` |
 | `section_detail(c)` | fast binary poll with train-position flags: `(info, [ {id, occupied, beforeCenter, behindCenter, brakesOn, canAdvanceFwd, trainIndex, liftSpeed, transportSpeed, ...} ])` |
-| `trains(c)` | every train: `index, blockId, blockName, sections, speed, accel, harness, lashed, front/center/rear {track, pos}, seats, seatedCars, seatsPerCar` |
+| `trains(c)` | every train: `index, blockId, blockName, sections, speed, accel, harness, lashed, front/center/rear {track, pos}, seats, seatedCars, seatsPerCar, customTrain` |
 | `sensors(c)`, `sensor_states(c)` | track triggers and their live state |
 | `events(since)` | sensor enter/leave, block-mode changes and in-game Advance presses since a sequence number |
 
@@ -85,7 +85,8 @@ Connection problems raise `OSError` / `ConnectionError`. The game must be in pla
 |---|---|
 | `stations(c)`, `station_status(c, st)` | full station state: gates, harness, platform, flyer, `canDispatch`, `trainReady`, `train` and its `seats` ... |
 | `station_states(c)` | fast binary poll of every station (booleans, plus `seats` of the train in it) |
-| `station_seats(c, st)` | seat capacity of the train in the station: `{train, seats, seatedCars, seatsPerCar}` (0 seats if empty, or if the park draws its trains with a script) |
+| `station_seats(c, st)` | seat capacity of the train in the station: `{train, seats, seatedCars, seatsPerCar, customTrain}` (0 seats if empty, or if the park draws its trains with a script) |
+| `custom_train(c, st)` | `True` when the train in the station is drawn by a park script instead of an NL2 car model |
 | `set_manual_dispatch(c, st, manual=True)` | manual or automatic dispatch |
 | `dispatch(c, st)` | dispatch the train |
 | `open_gates` / `close_gates` | gates |

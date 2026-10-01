@@ -164,9 +164,9 @@ class Gateway:
         try:
             nl = NL2Bridge(self.a.host, self.a.port, timeout=3.0)
             info = nl.bridge_info()
-            if info.get("api", 0) < 7:
-                log(f"Warning: bridge API {info.get('api')} - this gateway expects API 7 (NL2Bridge 1.1.0+);"
-                    " seat counts read 0")
+            if info.get("api", 0) < 8:
+                log(f"Warning: bridge API {info.get('api')} - this gateway expects API 8 (NL2Bridge 1.2.0+);"
+                    " seat counts / custom train read 0")
             self.nl, self.info = nl, info
             key = int(self.a.coaster) if str(self.a.coaster).lstrip("-").isdigit() else self.a.coaster
             self.select(key)
@@ -247,11 +247,12 @@ class Gateway:
                 v = (s["flags"], s["state"], s["rowsOpenCount"])
                 self.push("stn", s["index"], v, f"STN {s['index']} {s['flags']:08X} {s['state']} {s['rowsOpenCount']} "
                           + self.name("stn", s["index"]), force)
-                key = (s["hasTrain"], s.get("seats", 0))
+                key = (s["hasTrain"], s.get("seats", 0), s.get("customTrain", False))
                 if force or self.cache["seats"].get(s["index"], (None,))[0] != key:
                     full = full or nl.stations(c)       # train index / cars only when the train changes
                     j = full[s["index"]] if s["index"] < len(full) else {}
-                    v = (key, j.get("train", -1), j.get("seats", 0), j.get("seatedCars", 0), j.get("seatsPerCar", 0))
+                    v = (key, j.get("train", -1), j.get("seats", 0), j.get("seatedCars", 0), j.get("seatsPerCar", 0),
+                         int(j.get("customTrain", 0)))
                     self.push("seats", s["index"], v, f"SEATS {s['index']} " + " ".join(map(str, v[1:])), force)
         if "switches" in w:
             for t in nl.switch_states(c):

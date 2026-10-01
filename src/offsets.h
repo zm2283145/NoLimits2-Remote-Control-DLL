@@ -220,6 +220,8 @@ namespace train {
 // Car / steering-gear object (first pointer of each element above). The game animates every car's restraints
 // separately, from the train-wide train::HarnessPos/HarnessMotion (CarRestraintAnim).
 namespace car {
+  constexpr int ModelsBegin = 0x08, ModelsEnd = 0x10; // car model instances (0x38 bytes each). Empty when the park hides the
+                                                     // NL2 train and draws its own with a script (CarRestraintAnim skips it)
   constexpr int Train       = 0x20;              // NLTrain*
   constexpr int AnimBegin   = 0x28, AnimEnd = 0x30;  // restraint animation groups (0x28 bytes: {nodes vector, .., scale, cache})
   constexpr int SeatsBegin  = 0x40, SeatsEnd = 0x48; // std::vector<Seat*>: one entry per seat (rider camera). Train::SeatedCarCount

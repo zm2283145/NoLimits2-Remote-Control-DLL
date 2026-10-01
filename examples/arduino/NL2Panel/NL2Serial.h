@@ -44,6 +44,7 @@
 #define NL2_ST_HAS_FLYER          (1UL << 22)
 #define NL2_ST_HAS_TRAIN          (1UL << 23)
 #define NL2_ST_ROWS_OPEN          (1UL << 24)  // at least one single row is released
+#define NL2_ST_CUSTOM_TRAIN       (1UL << 25)  // train in station is drawn by a park script (no seats / rows)
 
 // ---- block flags (NL2Block::flags) ----
 #define NL2_BLK_CAN_ADV_FWD   0x01
@@ -154,8 +155,9 @@ public:
   void (*onSensor)(const NL2Sensor&) = nullptr;
   void (*onTrain)(const NL2Train&) = nullptr;
   void (*onRows)(int station, int count, int openCount) = nullptr;
-  // seat capacity of the train in a station (train -1 / seats 0 = empty, or a script-drawn train)
-  void (*onSeats)(int station, int train, int seats, int seatedCars, int seatsPerCar) = nullptr;
+  // seat capacity of the train in a station (train -1 / seats 0 = empty). customTrain = drawn by a park script
+  // instead of an NL2 car model, so it has no seats or per-row restraints
+  void (*onSeats)(int station, int train, int seats, int seatedCars, int seatsPerCar, bool customTrain) = nullptr;
   void (*onRow)(const NL2Row&) = nullptr;
   void (*onEvent)(const NL2Event&) = nullptr;
   void (*onDetail)(const NL2Detail&) = nullptr;
@@ -324,8 +326,8 @@ private:
       int st = ni(p), n = ni(p), o = ni(p);
       if (onRows) onRows(st, n, o);
     } else if (!strcmp(t, "SEATS")) {
-      int st = ni(p), tr = ni(p), n = ni(p), cars = ni(p), per = ni(p);
-      if (onSeats) onSeats(st, tr, n, cars, per);
+      int st = ni(p), tr = ni(p), n = ni(p), cars = ni(p), per = ni(p); bool custom = ni(p);
+      if (onSeats) onSeats(st, tr, n, cars, per, custom);
     } else if (!strcmp(t, "TRN")) {
       if (!onTrain) return;
       NL2Train r; r.index = ni(p); r.blockId = ni(p); r.station = ni(p); r.speed = nf(p); r.harness = nf(p);

@@ -33,7 +33,7 @@ STATION_FLAGS = ["estop", "manual", "canDispatch", "canCloseGates", "canOpenGate
                  "canOpenHarness", "canRaisePlatform", "canLowerPlatform", "canLockFlyer", "canUnlockFlyer",
                  "trainReady", "gatesOpen", "gatesClosed", "harnessOpen", "harnessClosed", "platformRaised",
                  "platformLowered", "flyerUnlocked", "flyerLocked", "hasGates", "hasPlatform", "hasFlyer", "hasTrain",
-                 "rowsOpen"]
+                 "rowsOpen", "customTrain"]
 
 BRAKE_CMDS = {"open": 7, "off": 7, "closed": 8, "on": 8, "trim": 12}
 LIFT_CMDS = {"fwd": 23, "bwd": 24, "off": 25, "idle": 41}
@@ -136,7 +136,7 @@ class NL2Bridge:
         return self.call(1000)[0] == R_OK
 
     def bridge_info(self):
-        """{name, api, build} (API 6+; 7 = seat capacity). Older bridges answer 'Unknown message' -> {'api': 0}."""
+        """{name, api, build} (API 6+; 7 = seat capacity, 8 = customTrain). Older bridges answer 'Unknown message' -> {'api': 0}."""
         try:
             return self._json(1001)
         except NL2Error:
@@ -188,7 +188,7 @@ class NL2Bridge:
 
     def stations(self, c):
         """Every station: name, state, hasTrain, train (index or -1), seats / seatedCars / seatsPerCar of that
-        train (API 7+), gates, harness, floor, flyer, ..."""
+        train (API 7+), customTrain (API 8+), gates, harness, floor, flyer, ..."""
         return self._json(1203, struct.pack(">i", self._c(c)))
 
     def station_status(self, c, station):
@@ -246,7 +246,8 @@ class NL2Bridge:
     def trains(self, c):
         """Every train: index, blockId/blockName holding it, sections it occupies, station index (-1),
         speed (m/s), accel, harness/flyer position, front/center/rear {track, pos} along the track and
-        seats / seatedCars / seatsPerCar (API 7+; 0 when the trains are drawn by a script, not an NL2 car model)."""
+        seats / seatedCars / seatsPerCar (API 7+) and customTrain (API 8+: 1 when the train has no NL2 car model
+        because a park script draws it; such trains report 0 seats)."""
         return self._json(1205, struct.pack(">i", self._c(c)))
 
     def section_detail(self, c):
@@ -389,11 +390,17 @@ class NL2Bridge:
         return self._json(1206, struct.pack(">ii", c, si))
 
     def station_seats(self, c, station):
-        """Seat capacity of the train in a station (API 7+): {train, seats, seatedCars, seatsPerCar}.
-        train is -1 and seats 0 when the station is empty. Seats are the car model's HEAD nodes, so trains
-        drawn by a script on top of an invisible NL2 train report 0."""
+        """Seat capacity of the train in a station (API 7+): {train, seats, seatedCars, seatsPerCar, customTrain}.
+        train is -1 and seats 0 when the station is empty. Seats are the car model's HEAD nodes, so a train
+        drawn by a park script reports 0 seats and customTrain True (API 8+)."""
         s = self.station_status(c, station)
-        return {k: s.get(k, -1 if k == "train" else 0) for k in ("train", "seats", "seatedCars", "seatsPerCar")}
+        out = {k: s.get(k, -1 if k == "train" else 0) for k in ("train", "seats", "seatedCars", "seatsPerCar")}
+        out["customTrain"] = bool(s.get("customTrain", 0))
+        return out
+
+    def custom_train(self, c, station):
+        """True when the train in the station is drawn by a park script instead of an NL2 car model (API 8+)."""
+        return self.station_seats(c, station)["customTrain"]
 
     def set_row_restraint(self, c, station, row, open_):
         """Open (True) or close (False) one row's restraints (row 1 = front, 0 = every row).

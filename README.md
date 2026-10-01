@@ -2,7 +2,7 @@
 
 NL2Bridge is a DLL that loads into the running **NoLimits 2** roller coaster simulator and opens a TCP control API. Physical control panels, PLCs, Arduinos and PC programs can then read the ride's state and operate it like a real ride:
 
-- **Read** block states, trains and their positions, stations, gates, restraints (per row), seat capacity of the train in the station, switches, transfer tables, track sensors and events.
+- **Read** block states, trains and their positions, stations, gates, restraints (per row), seat capacity of the train in the station (and whether it's a custom script-drawn train), switches, transfer tables, track sensors and events.
 - **Control** block modes, E-stop, simulation reset, block advance, dispatch, gates, restraints (all rows or one row), floors, flyer seats, switches and transfer tables.
 - **Drive devices**: open/close brakes, turn lifts and transport wheels on, off, forward or backward, stop and restart lift chains in any block mode, change lift and transport speeds live, lash trains to storage tracks.
 - **Script** coasters set to Scripted operation: your program becomes the ride's block logic.

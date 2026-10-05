@@ -136,11 +136,21 @@ class NL2Bridge:
         return self.call(1000)[0] == R_OK
 
     def bridge_info(self):
-        """{name, api, build} (9 = sessions; 10 = manual parameters/signature 3; 11 = manual brakes/signature 4). Older bridges answer 'Unknown message' -> {'api': 0}."""
+        """{name, api, build} (9 = sessions; 10 = manual parameters; 11 = brakes/signature 4; 12 = planned reconnect). Older bridges answer 'Unknown message' -> {'api': 0}."""
         try:
             return self._json(1001)
         except NL2Error:
             return {"name": "NL2Bridge", "api": 0, "build": "old"}
+
+    def panel_reconnect_ticket(self, coaster):
+        """API 12: prepare a one-use 500 ms ticket for the owning connection."""
+        return bytes.fromhex(self._json(1155, struct.pack('>i', self._c(coaster)))['ticket'])
+
+    def panel_resume(self, coaster, station_section, ticket):
+        """API 12: resume only after the prior socket closes, before lease expiry."""
+        if not isinstance(ticket, bytes) or len(ticket) != 16:
+            raise ValueError('Reconnect ticket must contain 16 bytes')
+        self.call(1156, struct.pack('>ii', self._c(coaster), int(station_section)) + ticket)
 
     def device_params(self, c, block):
         """Lift / transport parameters of a section (API 6): {'lift': {speed, accel, decel, idleMode, current} | None,

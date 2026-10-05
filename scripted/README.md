@@ -128,6 +128,9 @@ Live acceptance recorded locally:
   the fitted tires, release turns tires off, and brake closure stops the train.
   Station advance still requires the main pair. The new mailbox is described in
   [protocol.md](protocol.md#manual-brake-configuration-signature-revision-4--api-11).
+* Ten planned socket reconnections during a live held departure do not stop or
+  rearm it. Eight reconnects preserve a current manual speed and its original
+  snapshot; explicit release restores the original speed. Ticket replay is refused.
 
 The Fury profile includes the circuit and three storage tracks.
 No deployed PLC/HMI sends the development protocol yet. Four remote positions,
@@ -182,7 +185,7 @@ checking those fields. Normal-mode availability queries remain operations 1/4.
 Unknown section coordinates serialize as finite zero values, avoiding invalid
 JSON from uninitialized storage-track coordinates. API version remains 8.
 
-## Bridge 1.2.6 panel sessions, manual devices and crash observer (API 11)
+## Bridge 1.2.7 panel sessions, manual devices and crash observer (API 12)
 
 The development PanelLink requires controller signature revision 3 and claims a coaster before sending held inputs. Claims
 expire after 750 ms without an input heartbeat. Release and disconnect restore

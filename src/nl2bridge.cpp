@@ -14,6 +14,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <psapi.h>
+#include <bcrypt.h>
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
@@ -597,6 +598,8 @@ enum : uint16_t {
   Q_SET_ESTOP         = 1131,   // i32 coaster, u8 on -> OK
   Q_RESET_COASTER     = 1132,   // i32 coaster -> OK   (Coaster.requestReset: trains back to start positions)
   Q_PANEL_SESSION     = 1153,   // i32 coaster, station SID, enable, suppressMessages, nativeTelemetryPort -> OK
+  Q_PANEL_PREPARE_RESUME = 1155, // i32 coaster -> one-use 16-byte reconnect ticket (hex JSON)
+  Q_PANEL_RESUME = 1156,       // i32 coaster, station SID, 16 bytes ticket -> OK
   Q_PANEL_SESSION_STATUS = 1154, // no payload -> JSON (global message suppression status)
   Q_DEVICE_SET        = 1150,   // i32 coaster, i32 sectionId, i32 device (0 brake,1 lift,2 transport), i32 value -> Int (full manual only)
   Q_DEVICE_GET        = 1207,   // i32 coaster, i32 sectionId -> String (JSON: brake/lift/transport device state)
@@ -679,7 +682,7 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w, uintptr_t client) {
   case Q_PING: return R_OK;
 
   case Q_BRIDGE_INFO:
-    w.str("{\"name\":\"NL2Bridge\",\"api\":11,\"build\":\"1.2.6\"}");
+    w.str("{\"name\":\"NL2Bridge\",\"api\":12,\"build\":\"1.2.7\"}");
     return R_STRING;
 
   case Q_PANEL_SESSION: {
@@ -712,6 +715,32 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w, uintptr_t client) {
       ",\"nativePort\":" + std::to_string(g_suppressionPort.load()) +
       ",\"error\":\"" + JsonEsc(error) + "\"}");
     return R_STRING;
+  }
+  case Q_PANEL_PREPARE_RESUME: {
+    int ci=r.i32();if(r.bad) return fail("Invalid resume request");
+    std::array<uint8_t,16> ticket{};
+    if (BCryptGenRandom(nullptr,ticket.data(),(ULONG)ticket.size(),BCRYPT_USE_SYSTEM_PREFERRED_RNG)!=0)
+      return fail("Could not create reconnect ticket");
+    if (!g_sessions.prepareResume(ci,client,GetTickCount64(),ticket))
+      return fail("An active owned panel session is required");
+    static const char hex[]="0123456789abcdef";std::string encoded;
+    for(auto byte:ticket) {encoded.push_back(hex[byte>>4]);encoded.push_back(hex[byte&15]);}
+    w.str("{\"ticket\":\""+encoded+"\"}");return R_STRING;
+  }
+  case Q_PANEL_RESUME: {
+    int ci=r.i32(),sid=r.i32();std::array<uint8_t,16> ticket{};
+    for(auto& byte:ticket) byte=r.u8();
+    if(r.bad || sid<1 || sid>4095) return fail("Invalid reconnect ticket");
+    Locked L;uint8_t* c=GetCoaster(ci,&err);if(!c)return fail(err);
+    auto entry=FindEntry(c,(uint32_t)sid);
+    if(Rd<uint8_t>(c,coaster::OperationMode)!=2 || !entry || !IsScriptedNode(entry->node) ||
+       !SGetI(c,(uint32_t)sid,SG_IS_STATION)) return fail("Scripted panel coaster changed");
+    uintptr_t previous=0;
+    if(!g_sessions.resume(ci,(uintptr_t)c,(uint32_t)sid,client,GetTickCount64(),ticket,previous))
+      return fail("Reconnect ticket expired, consumed, or previous connection still active");
+    for(auto& saved:g_deviceOverrides)
+      if(saved.coaster==ci && saved.incarnation==(uintptr_t)c && saved.owner==previous) saved.owner=client;
+    return R_OK;
   }
 
   case Q_DEVICE_PARAMS_GET: {
@@ -1331,7 +1360,7 @@ static DWORD WINAPI InitThread(LPVOID self) {
   g_trace = GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
   wcscpy(dot, L".log");
   g_log = _wfopen(path, L"a");
-  Log("NL2Bridge 1.2.6 starting (API 11), port %d", g_port);
+  Log("NL2Bridge 1.2.7 starting (API 12), port %d", g_port);
   if (g_trace) Log("TCP diagnostic tracing enabled");
   ResolveAll();
   Log(G.ok ? "all symbols resolved" : "WARNING: some symbols missing - requests will be refused");

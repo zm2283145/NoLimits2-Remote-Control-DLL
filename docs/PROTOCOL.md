@@ -104,6 +104,8 @@ The position flags are the game's own `Section.isTrainBefore/Behind*` queries, t
 |---|---|---|
 | 1153 | i32 coaster, i32 primary station section ID, i32 enabled, i32 suppressMessages, i32 nativeTelemetryPort | OK or Error. Claim/release one connection's reusable-controller session. Requires a recognized in-game controller. |
 | 1154 | none | String JSON `{requested, active, nativePort, error}` describing native Attraction Mode request/acknowledgement. An acknowledged command does not guarantee a crash window is hidden. |
+| 1155 | i32 coaster | API 12. JSON `{ticket:"32 hex digits"}`; one-use planned reconnect ticket for the active owner, valid for 500 ms. |
+| 1156 | i32 coaster, i32 station section ID, 16 ticket bytes | API 12. OK/Error. Resume only after the old socket disconnects and before ticket/input lease expiry; preserves mode and temporary parameter snapshots. |
 
 See [the development protocol](../scripted/protocol.md) for input/state mailboxes,
 lease expiry, permitted writes, temporary speed restoration and latched crash

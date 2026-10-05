@@ -60,6 +60,24 @@ class PanelLink:
             self.bridge.panel_session(self.coaster, self.station, enabled=False)
             self.released = True
 
+    def prepare_reconnect(self):
+        if self.released:
+            raise NL2Error("Panel session was released; reconnect before sending")
+        if self.bridge.bridge_info().get('api', 0) < 12:
+            raise NL2Error('Planned connection recycling requires API 12')
+        return self.bridge.panel_reconnect_ticket(self.coaster)
+
+    def resume_on(self, bridge, ticket):
+        """Switch to a new socket using a ticket, then immediately send inputs.
+
+        This preserves the in-game held levels and temporary speed snapshot.
+        It never extends the input lease; slow/failed reconnects stop normally.
+        """
+        if self.released:
+            raise NL2Error("Released sessions cannot resume")
+        bridge.panel_resume(self.coaster, self.station, ticket)
+        self.bridge = bridge
+
     def configure_training(self, *, enabled=False, faults=0, chance_per_thousand=10, trigger_now=False):
         if self.released:
             raise NL2Error("Panel session was released; reconnect before sending")

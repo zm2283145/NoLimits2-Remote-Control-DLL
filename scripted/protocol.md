@@ -140,6 +140,22 @@ The waiting brake still requires the main held Advance/Dispatch pair to release
 a train toward the station. Ride stop, fault, E-stop and Block Hold override
 the setting. Brake release can allow a train to coast even with tires off.
 
+## Planned TCP reconnection (API 12)
+
+The Opta runtime workaround closes/reopens its sketch socket periodically.
+Message 1155 takes `i32 coasterIndex` on the active owning connection and returns
+JSON `{"ticket":"32 hex digits"}` from the system cryptographic random generator.
+Close that socket, open the replacement, then send message 1156 with
+`i32 coasterIndex, i32 stationSectionId, 16 raw ticket bytes`. Send the latest
+held-input packet immediately after the successful reply.
+
+Tickets are one-use, expire after 500 ms, and never extend the 750 ms input lease.
+The old socket must have disconnected; the coaster object and station must match.
+Explicit release cancels its ticket. A successful resume transfers ownership,
+mode, suppression preference and temporary device snapshots to the new client.
+The script's existing held levels are unchanged. Failed/slow reconnects retain
+the normal stop/handback behavior; no ticket authorizes movement after expiry.
+
 ## Crash fault while NLVM is offline
 
 The script alone cannot report a real NL2 crash because frame callbacks stop.

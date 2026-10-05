@@ -83,11 +83,13 @@ See [docs/CONTROLLER.md](docs/CONTROLLER.md).
 
 ## Building
 
-Development version **1.2.6** uses API 11. It adds one-writer panel sessions,
+Development version **1.2.7** uses API 12. It adds one-writer panel sessions,
 heartbeat/disconnect restoration of licensed native message suppression, and
 independent crash fault 909 reporting after NL2 stops stepping its script,
 manual lift idle selection, independent manual brake selection with route
-interlocks, and restoration of temporary manual speed settings.
+interlocks, and restoration of temporary manual speed settings. One-use,
+short-lived reconnect tickets support the Opta's periodic socket refresh without
+extending the input lease or dropping an uninterrupted held departure.
 Scripted status reads no longer press Forward, and unavailable section coordinates
 serialize as finite values. See [scripted/README.md](scripted/README.md) for the
 in-game controller's live acceptance status and integration limits. The deployed
@@ -104,7 +106,7 @@ dist/send_all_test.exe
 ```
 MinGW-w64 (for example MSYS2 `mingw-w64-x86_64-gcc`):
 ```
-g++ -O2 -std=c++17 -shared -static -o NL2Bridge.dll src/nl2bridge.cpp -lws2_32 -lpsapi
+g++ -O2 -std=c++17 -shared -static -o NL2Bridge.dll src/nl2bridge.cpp -lws2_32 -lpsapi -lbcrypt
 g++ -O2 -municode -static -o NL2BridgeInjector.exe src/injector.cpp
 ```
 Or run `build.ps1`, which writes both to `dist/`.

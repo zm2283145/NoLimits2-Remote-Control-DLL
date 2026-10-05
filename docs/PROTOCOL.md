@@ -98,6 +98,17 @@ The position flags are the game's own `Section.isTrainBefore/Behind*` queries, t
 | 1131 | i32 coaster, u8 on | OK. Emergency stop on/off. |
 | 1132 | i32 coaster | OK. Simulation reset (`Coaster.requestReset`): trains back to their start positions, block mode back to Auto. Only runs while the game is simulating; a minimized NL2 window is paused. |
 
+### Development panel sessions (API 9+, controller revision requires API 10)
+
+| Id | Request | Reply |
+|---|---|---|
+| 1153 | i32 coaster, i32 primary station section ID, i32 enabled, i32 suppressMessages, i32 nativeTelemetryPort | OK or Error. Claim/release one connection's reusable-controller session. Requires a recognized in-game controller. |
+| 1154 | none | String JSON `{requested, active, nativePort, error}` describing native Attraction Mode request/acknowledgement. An acknowledged command does not guarantee a crash window is hidden. |
+
+See [the development protocol](../scripted/protocol.md) for input/state mailboxes,
+lease expiry, permitted writes, temporary speed restoration and latched crash
+faults. Coaster JSON includes `panelFault` (0 or latched bridge fault 909).
+
 ### Stations
 | Id | Request | Reply |
 |---|---|---|

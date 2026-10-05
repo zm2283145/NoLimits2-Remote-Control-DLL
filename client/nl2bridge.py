@@ -136,7 +136,7 @@ class NL2Bridge:
         return self.call(1000)[0] == R_OK
 
     def bridge_info(self):
-        """{name, api, build} (API 6+; 7 = seat capacity, 8 = customTrain). Older bridges answer 'Unknown message' -> {'api': 0}."""
+        """{name, api, build} (9 = panel sessions; 10 = manual parameter restoration and controller signature 3). Older bridges answer 'Unknown message' -> {'api': 0}."""
         try:
             return self._json(1001)
         except NL2Error:
@@ -283,6 +283,23 @@ class NL2Bridge:
     def reset_coaster(self, c):
         """Full simulation reset of the coaster: trains return to their start positions (API v5)."""
         self.call(1132, struct.pack(">i", self._c(c)))
+
+    def panel_session(self, c, station_section, *, enabled=True, suppress_messages=False, telemetry_port=15151):
+        """API 9: claim/release this connection's scripted panel session.
+
+        Optional message suppression uses NL2's licensed native Attraction Mode.
+        The DLL restores messages on disconnect or a missing 750 ms heartbeat.
+        """
+        if not isinstance(station_section, int) or not 1 <= station_section <= 4095:
+            raise ValueError("Invalid station section ID")
+        if not isinstance(telemetry_port, int) or not 1 <= telemetry_port <= 65535:
+            raise ValueError("Invalid native telemetry port")
+        self.call(1153, struct.pack(">iiiii", self._c(c), station_section,
+                                   int(bool(enabled)), int(bool(suppress_messages)), telemetry_port))
+
+    def panel_session_status(self):
+        """API 9: requested/active native suppression and any refusal reason."""
+        return self._json(1154, b"")
 
     DEVICES = {"brake": 0, "lift": 1, "transport": 2}
 

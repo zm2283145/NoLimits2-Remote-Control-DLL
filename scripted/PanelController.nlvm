@@ -1,0 +1,981 @@
+import com.nolimitscoaster.*;
+import nlvm.math3d.*;
+
+/** Shared in-game engine. RideProfile is generated per park, not hard-coded here.
+ * Kinds: station=0, lift=1, brake=2, storage=3, transfer=4, pass-through=5.
+ * Inputs use a reserved station block display-state mailbox; see protocol.md.
+ * This source is developmental until the live acceptance tests pass.
+ */
+public class PanelController extends Script implements BlockSystemController
+{
+  private Coaster coaster;
+  private PanelBlock[] blocks = new PanelBlock[64];
+  private PanelRoute[] routes = new PanelRoute[192];
+  private int count = 0;
+  private int routeCount = 0;
+  private int station = -1;
+  private int beforeStation = -1;
+  private int flags = 0;
+  private int mode = 0;
+  private int selected = 0;
+  private long heartbeat = 0;
+  private long disconnectedAt = 0;
+  private bool panel = false;
+  private bool handback = false;
+  private bool armed = false;
+  private bool cycleComplete = false;
+  private bool fatal = false;
+  private bool seenOnline = false;
+  private int faultCode = 901;
+  private bool previousPanel = false;
+  private int previousMode = -1;
+  private float dispatchHold = 0;
+  private int gameMode = 0; // 0 auto, 1 manual blocks, 2 full manual devices
+  private bool reconcileGame = false;
+  private bool dispatchOwned = false;
+  private float multiGap = 0;
+  private float multiDecel = 0;
+  private bool coupled = false;
+  private int departingTrain = -1;
+  private int arrivingTrain = -1;
+  private PanelRoute coupledApproach;
+  private float simulationTime = 0;
+  private float[] flightStarted = new float[64];
+  private int[] flightTarget = new int[64];
+  private bool[] trainingStall = new bool[64];
+  private float flightTimeout = 70;
+  private bool trainingEnabled = false;
+  private int trainingMask = 0;
+  private int trainingForceMask = 0;
+  private int trainingChance = 10; // per thousand, per eligible event
+  private int randomSeed = 12345;
+  private static final int TRAINING_BASE = 1342177280;
+  private static final int TRAINING_END = 1342242816;
+  private static final int INPUT_BASE = 1073741824;
+  private static final int INPUT_END = 1107296256;
+  private static final int FAULT_BASE = 536936448;
+  private static final int SIGNATURE = 536870915; // protocol 3 plus manual lift configuration
+
+  public bool onInit()
+  {
+    coaster = sim.getCoasterForEntityId(getParentEntityId());
+    if (coaster == null || !coaster.isScriptedOperationMode())
+    {
+      System.err.println("PanelController requires a Scripted-operation coaster");
+      return false;
+    }
+    for (int i = 0; i < 64; ++i) flightTarget[i] = -1;
+    randomSeed = (int)(System.currentTimeMillis() & 2147483647);
+    RideProfile.configure(this);
+    if (fatal || count < 2 || station < 0 || beforeStation < 0 || coaster.getTrainCount() > 64)
+    {
+      System.err.println("PanelController: incomplete ride profile");
+      for (int i = 0; i < count; ++i) blocks[i].stop();
+      coaster.setEmergencyStop(true);
+      return false;
+    }
+    blocks[station].block.registerState(SIGNATURE, "PanelController ready", Block.LAMP_ON);
+    blocks[station].block.registerState(FAULT_BASE + 901, "FAULT 901: invalid ride profile", Block.LAMP_FLASHING);
+    blocks[station].block.registerState(FAULT_BASE + 902, "FAULT 902: unexpected multiple trains", Block.LAMP_FLASHING);
+    blocks[station].block.registerState(FAULT_BASE + 904, "FAULT 904: train overshot stop position", Block.LAMP_FLASHING);
+    blocks[station].block.registerState(FAULT_BASE + 905, "FAULT 905: train failed to stop", Block.LAMP_FLASHING);
+    blocks[station].block.registerState(FAULT_BASE + 906, "FAULT 906: multi-move separation lost", Block.LAMP_FLASHING);
+    blocks[station].block.registerState(FAULT_BASE + 907, "FAULT 907: possible valley / circuit timeout", Block.LAMP_FLASHING);
+    blocks[station].block.registerState(FAULT_BASE + 908, "FAULT 908: station park position not reached", Block.LAMP_FLASHING);
+    blocks[station].block.registerState(FAULT_BASE + 909, "FAULT 909: simulator crash/offline; reset required", Block.LAMP_FLASHING);
+    coaster.setBlockSystemController(this);
+    for (int i = 0; i < count; ++i)
+      if (blocks[i].kind == 0) blocks[i].section.setStationManualDispatchMode(false);
+    System.out.println("PanelController: " + coaster.getName() + ", " + count + " blocks");
+    return !fatal;
+  }
+
+  public int addBlock(String name, int kind, int sectionId, float parkingDistance)
+  {
+    Block b = coaster.getBlock(name);
+    if (b == null || count == 64 || kind < 0 || kind > 5)
+    {
+      System.err.println("PanelController: invalid/missing block " + name);
+      fatal = true;
+      return -1;
+    }
+    for (int i = 0; i < count; ++i)
+      if (blocks[i].block.getName().equals(name))
+      {
+        fatal = true;
+        return -1;
+      }
+    blocks[count] = new PanelBlock(b, kind, sectionId);
+    blocks[count].parkDistance = parkingDistance;
+    if (kind == 0 && station == -1) station = count;
+    ++count;
+    return count - 1;
+  }
+
+  public void addRoute(int source, int destination, bool reverse, String trackName, int position)
+  {
+    if (source < 0 || destination < 0 || source >= count || destination >= count ||
+        source == destination || routeCount == 192)
+    {
+      fatal = true;
+      return;
+    }
+    SpecialTrack t = null;
+    if (trackName != null)
+    {
+      t = coaster.getSpecialTrack(trackName);
+      if (t == null || position < 0 || position >= t.getNumberOfSwitchDirections())
+      {
+        fatal = true;
+        return;
+      }
+    }
+    routes[routeCount] = new PanelRoute(source, destination, reverse, t, position);
+    ++routeCount;
+  }
+
+  public void setFlightTimeout(float seconds)
+  {
+    if (seconds <= 0) { fatal = true; return; }
+    flightTimeout = seconds;
+  }
+
+  private int randomValue()
+  {
+    randomSeed = (randomSeed * 1664525 + 1013904223) & 2147483647;
+    return randomSeed;
+  }
+
+  private bool trainingEvent(int mask)
+  {
+    if (!panel || !trainingEnabled || (trainingMask & mask) == 0) return false;
+    if ((trainingForceMask & mask) != 0) { trainingForceMask &= ~mask; return true; }
+    return randomValue() % 1000 < trainingChance;
+  }
+
+  public void setMultiMove(float gap, float decel)
+  {
+    if (station < 0 || !blocks[station].physicalClear || gap < 1 || decel <= 0)
+    { fatal = true; return; }
+    multiGap = gap;
+    multiDecel = decel;
+  }
+
+  public void setStopMonitor(int index, int timeoutMs, float tolerance)
+  {
+    if (index < 0 || index >= count || timeoutMs < 0 || tolerance < 0 ||
+        tolerance >= blocks[index].parkDistance)
+    { fatal = true; return; }
+    blocks[index].stopTimeoutMs = timeoutMs;
+    blocks[index].stopTolerance = tolerance;
+  }
+
+  public void setReturnToPark(int index)
+  {
+    if (index < 0 || index >= count || blocks[index].kind != 0 || !blocks[index].physicalClear)
+    { fatal = true; return; }
+    blocks[index].returnToPark = true;
+  }
+
+  public void setPhysicalClear(int index)
+  {
+    if (index < 0 || index >= count || (blocks[index].kind != 0 && blocks[index].kind != 5))
+    { fatal = true; return; }
+    blocks[index].physicalClear = true;
+    if (blocks[index].empty()) blocks[index].state = 0;
+  }
+
+  public void setBeforeStation(int index) { beforeStation = index; }
+
+  public void addAuxiliary(int owner, String name)
+  {
+    Section s = coaster.getSection(name);
+    if (owner < 0 || owner >= count || s == null || blocks[owner].auxiliaryCount == 8)
+    { fatal = true; return; }
+    PanelBlock b = blocks[owner];
+    b.auxiliary[b.auxiliaryCount++] = s;
+  }
+
+  public void setParkingSection(int owner, String name)
+  {
+    Section s = coaster.getSection(name);
+    if (owner < 0 || owner >= count || s == null) { fatal = true; return; }
+    blocks[owner].parkSection = s;
+  }
+
+  private bool held() { return (flags & 12) == 12; }
+  private bool enabled() { return !panel || (flags & 3) == 3; }
+  private bool liftEnabled(int index) { return !panel || ((flags & 16) != 0 && !blocks[index].liftRestartRequired); }
+
+  private bool stationary()
+  {
+    for (int i = 0; i < coaster.getTrainCount(); ++i)
+    {
+      double v = coaster.getTrainAt(i).getSpeed();
+      if (v > 0.05 || v < -0.05) return false;
+    }
+    return true;
+  }
+
+  private bool mainAligned()
+  {
+    // Storage branches must not all be aligned at once. Require only forward
+    // circuit routes, excluding routes into or out of storage/manual transfer.
+    // Never move a table automatically to recover ownership.
+    for (int i = 0; i < routeCount; ++i)
+      if (!routes[i].backwards &&
+          (blocks[routes[i].source].kind < 3 || blocks[routes[i].source].kind == 5) &&
+          (blocks[routes[i].destination].kind < 3 || blocks[routes[i].destination].kind == 5) &&
+          !routes[i].aligned()) return false;
+    return true;
+  }
+
+  private PanelRoute available(int index, bool reverse)
+  {
+    PanelRoute found = null;
+    for (int r = 0; r < routeCount; ++r)
+    {
+      PanelRoute route = routes[r];
+      if (route.source != index || route.backwards != reverse || !route.aligned()) continue;
+      PanelBlock target = blocks[route.destination];
+      if (target.state != 0 || !target.empty()) continue;
+      if (found != null) return null; // ambiguous branch: no guessed movement
+      found = route;
+    }
+    return found;
+  }
+
+  private bool startMove(int index, bool reverse)
+  {
+    PanelRoute route = available(index, reverse);
+    if (route == null) return false;
+    PanelBlock b = blocks[index];
+    b.destination = route.destination;
+    b.backwards = reverse;
+    blocks[b.destination].state = 1; // reserve before releasing the source
+    blocks[b.destination].backwards = reverse;
+    blocks[b.destination].controlSource = index;
+    blocks[b.destination].arrivalRoute = route;
+    b.state = 4;
+    // Disable the stock warning before an expected approach updates NL2's
+    // logical block assignment, not one frame after its warning has appeared.
+    if (b.destination == station && expectedStationOverlap(station))
+      blocks[station].block.setEnableMultipleTrainsOnBlockWarning(false);
+    if (!reverse && b.kind == 1)
+    {
+      Train t = b.section.getTrainOnSection();
+      if (t != null && t.getTrainIndex() >= 0 && t.getTrainIndex() < 64)
+      {
+        int train = t.getTrainIndex();
+        flightStarted[train] = simulationTime;
+        flightTarget[train] = route.destination;
+        trainingStall[train] = trainingEvent(4);
+      }
+    }
+    return true;
+  }
+
+  private bool movingRouteAligned(int index)
+  {
+    PanelBlock b = blocks[index];
+    for (int r = 0; r < routeCount; ++r)
+      if (routes[r].source == index && routes[r].destination == b.destination &&
+          routes[r].backwards == b.backwards && routes[r].aligned()) return true;
+    return false;
+  }
+
+  private void inputs(long now)
+  {
+    int packet = blocks[station].block.getState();
+    if (packet >= 0x51000000 && packet < 0x51004000 && panel)
+    {
+      int data = packet - 0x51000000;
+      int id = data >> 2;
+      for (int i = 0; i < count; ++i)
+        if (blocks[i].sectionId == id && blocks[i].kind == 1)
+          blocks[i].manualLiftIdle = mode != 0 && (data & 3) == 1;
+      heartbeat = now;
+    }
+    if (packet >= TRAINING_BASE && packet < TRAINING_END && panel)
+    {
+      int data = packet - TRAINING_BASE;
+      trainingMask = data & 7;
+      trainingChance = (data >> 3) & 1023;
+      if (trainingChance > 100) trainingChance = 100; // max 10% per eligible event
+      trainingEnabled = (data & 8192) != 0 && (flags & 1) != 0 && !fatal;
+      trainingForceMask = trainingEnabled && (data & 16384) != 0 ? trainingMask : 0;
+      heartbeat = now;
+    }
+    if (packet >= INPUT_BASE && packet < INPUT_END)
+    {
+      int data = packet - INPUT_BASE;
+      flags = data & 2047;
+      mode = (data >> 11) & 3;
+      int selectedId = (data >> 13) & 4095;
+      selected = -1;
+      for (int i = 0; i < count; ++i)
+        if (blocks[i].sectionId == selectedId) selected = i;
+      heartbeat = now;
+      if (!panel)
+      {
+        panel = true;
+        handback = false;
+        armed = false;
+        gameMode = 0;
+      }
+    }
+    if (panel && now - heartbeat > 750)
+    {
+      panel = false;
+      handback = true;
+      disconnectedAt = now;
+      trainingEnabled = false;
+      trainingForceMask = 0;
+      for (int t = 0; t < 64; ++t) trainingStall[t] = false;
+      flags = 0;
+      armed = false;
+    }
+    if (handback && now - disconnectedAt >= 1000 && stationary() && mainAligned() && !coaster.isEmergencyStop())
+    {
+      handback = false;
+      mode = 0;
+      for (int i = 0; i < count; ++i)
+      {
+        if (blocks[i].kind == 0 && (blocks[i].state == 6 || blocks[i].state == 8))
+        {
+          releaseReturnRoute(i);
+          blocks[i].section.setStationEntering();
+          blocks[i].state = 5;
+        }
+      }
+    }
+    if (panel != previousPanel || (panel && mode != previousMode))
+    {
+      for (int i = 0; i < count; ++i) blocks[i].manualLiftIdle = false;
+      armed = false;
+      dispatchHold = 0;
+      previousPanel = panel;
+      previousMode = mode;
+    }
+    if (dispatchOwned != (panel || handback))
+    {
+      dispatchOwned = panel || handback;
+      for (int i = 0; i < count; ++i)
+        if (blocks[i].kind == 0) blocks[i].section.setStationManualDispatchMode(dispatchOwned);
+    }
+    if (panel && (flags & 12) == 0)
+    {
+      armed = true;
+      cycleComplete = false;
+      dispatchHold = 0;
+    }
+  }
+
+  public void onNextFrame(float tick)
+  {
+    if (count == 0 || station < 0) return;
+    if (tick > 0) simulationTime += tick;
+    inputs(System.currentTimeMillis());
+    // Native UI callbacks are supplemented by the public mode query: external
+    // API mode changes may update NL2 without delivering an NLVM callback.
+    int actual = coaster.getBlockSystemMode();
+    if (actual == Coaster.E_BLOCK_SYSTEM_MODE_AUTOMATIC ||
+        actual == Coaster.E_BLOCK_SYSTEM_MODE_SEMI_MANUAL ||
+        actual == Coaster.E_BLOCK_SYSTEM_MODE_FULL_MANUAL) seenOnline = true;
+    else if (actual == Coaster.E_BLOCK_SYSTEM_MODE_OFFLINE && seenOnline && !fatal)
+    { fatal = true; faultCode = 909; }
+    if (!panel)
+    {
+      if (actual == Coaster.E_BLOCK_SYSTEM_MODE_AUTOMATIC && gameMode != 0) onAutoMode(coaster);
+      else if (actual == Coaster.E_BLOCK_SYSTEM_MODE_SEMI_MANUAL && gameMode != 1) onManualBlockMode(coaster);
+      else if (actual == Coaster.E_BLOCK_SYSTEM_MODE_FULL_MANUAL && gameMode != 2) onFullManualMode(coaster);
+    }
+    // Native full-manual devices belong to the game while no panel owns the
+    // coaster. Do not overwrite the operator's device selections each frame.
+    if (!panel && !handback && gameMode == 2 && !coaster.isEmergencyStop() && !fatal) return;
+    if (reconcileGame && coupled && stationary()) reconcileGame = false;
+    if (reconcileGame && stationary())
+    {
+      for (int i = 0; i < count; ++i)
+      {
+        PanelBlock b = blocks[i];
+        b.destination = -1;
+        b.controlSource = -1;
+        b.arrivalRoute = null;
+        b.backwards = false;
+        b.state = b.empty() ? 0 : (b.kind == 0 ? 5 : (b.section.isTrainOnSection() ? 3 : 1));
+        if (b.kind == 0 && b.state == 5) b.section.setStationEntering();
+      }
+      reconcileGame = false;
+    }
+    bool stopped = fatal || handback || reconcileGame || !enabled() || coaster.isEmergencyStop() || (panel && mode == 3);
+    if (panel && held() && armed && !cycleComplete && (flags & 256) != 0) dispatchHold += tick;
+    else dispatchHold = 0;
+    for (int t = 0; t < coaster.getTrainCount(); ++t)
+    {
+      int target = flightTarget[t];
+      if (target < 0) continue;
+      if (sectionHasTrain(blocks[target].section, t))
+      { flightTarget[t] = -1; trainingStall[t] = false; continue; }
+      if (trainingStall[t] && simulationTime - flightStarted[t] >= 5)
+      {
+        bool onLift = false;
+        for (int b = 0; b < count; ++b)
+          if (blocks[b].kind == 1 && sectionHasTrain(blocks[b].section, t)) onLift = true;
+        if (!onLift) { coaster.getTrainAt(t).setLashedToTrack(true); trainingStall[t] = false; }
+      }
+      if (!fatal && simulationTime - flightStarted[t] >= flightTimeout)
+      { fatal = true; faultCode = 907; stopped = true; }
+    }
+    // Validate the complete occupancy snapshot before issuing any movement.
+    for (int i = 0; i < count; ++i)
+    {
+      PanelBlock b = blocks[i];
+      bool atStop = (i == beforeStation && b.state == 3) ||
+        (i == station && (b.state == 5 || b.state == 6));
+      if (!fatal && b.stopTolerance > 0 && atStop &&
+          b.parkSection.isTrainBehindEndOfSection(b.parkDistance - b.stopTolerance))
+      { fatal = true; faultCode = 904; stopped = true; }
+      if (coupled && i == station && !coupledGapClear())
+      { fatal = true; faultCode = 906; stopped = true; }
+      if (!fatal && ((!b.singleOccupant() && !validCoupledOccupancy(i)) ||
+          (b.physicalClear && b.block.getNumberOfTrainsOnBlock() > 1 && !expectedStationOverlap(i))))
+      {
+        fatal = true;
+        faultCode = 902;
+        stopped = true;
+        coaster.setEmergencyStop(true);
+      }
+    }
+    for (int i = 0; i < count; ++i)
+    {
+      PanelBlock b = blocks[i];
+      // A native station handler can finish after handback with its logical
+      // train assignment still set even though that train has physically left.
+      if (b.kind == 0 && b.physicalClear && b.state == 5 && b.empty())
+      {
+        b.stop(); b.state = 0; b.destination = -1;
+        b.controlSource = -1; b.arrivalRoute = null;
+      }
+      // Reconcile occupancy before considering any free-block permission.
+      if (b.state == 0 && !b.empty()) b.state = 1;
+      if (b.kind == 1)
+      {
+        bool start = (flags & 16) != 0;
+        bool blocked = stopped || (selected == i && (flags & 128) != 0) ||
+          (b.state == 3 && available(i, false) == null) ||
+          (b.state == 4 && !movingRouteAligned(i));
+        if (!panel) b.liftRestartRequired = false;
+        else
+        {
+          if (blocked && !b.empty())
+          {
+            b.liftRestartRequired = true;
+            b.liftStartReleased = !start;
+          }
+          if (b.liftRestartRequired)
+          {
+            if (!start) b.liftStartReleased = true;
+            if (start && !b.previousLiftStart && b.liftStartReleased && !blocked)
+              b.liftRestartRequired = false;
+          }
+        }
+        b.previousLiftStart = start;
+      }
+      b.expectStop = false;
+      if (stopped || (panel && !held() && sharesStationTrain(i))) b.stop();
+      else process(i);
+      bool manualGame = !panel && !handback && gameMode == 1;
+      bool ready = b.state == 3 || (b.kind == 0 && b.state == 5 && b.section.isStationWaitingForAdvance());
+      b.block.setAdvanceFwdEnabled(!stopped && manualGame && ready && available(i, false) != null);
+      b.block.setAdvanceBwdVisible(b.kind >= 3);
+      b.block.setAdvanceBwdEnabled(!stopped && manualGame && b.kind >= 3 && ready && available(i, true) != null);
+      b.block.setEnableMultipleTrainsOnBlockWarning(!expectedStationOverlap(i));
+      b.block.setState(b.state);
+    }
+    long now = System.currentTimeMillis();
+    for (int i = 0; i < count; ++i)
+    {
+      PanelBlock b = blocks[i];
+      Train train = b.section.getTrainOnSection();
+      bool atStop = (i == beforeStation && b.state == 3) ||
+        (i == station && (b.state == 5 || b.state == 6));
+      if (!fatal && b.stopTolerance > 0 && atStop &&
+          b.parkSection.isTrainBehindEndOfSection(b.parkDistance - b.stopTolerance))
+      { fatal = true; faultCode = 904; }
+      bool stopCommand = b.expectStop;
+      bool moving = train != null && (train.getSpeed() > 0.15 || train.getSpeed() < -0.15);
+      if (stopCommand && moving && b.stopTimeoutMs > 0)
+      {
+        if (b.stopRequestedAt == 0) b.stopRequestedAt = now;
+        if (!fatal && now - b.stopRequestedAt >= b.stopTimeoutMs)
+        { fatal = true; faultCode = 905; }
+      }
+      else b.stopRequestedAt = 0;
+    }
+    if (fatal)
+    {
+      coaster.setEmergencyStop(true);
+      for (int i = 0; i < count; ++i) blocks[i].stop();
+    }
+    // A stable marker is visible on the primary station while idle, enabling the
+    // bridge to distinguish this engine from an unrelated script.
+    if (fatal) blocks[station].block.setState(FAULT_BASE + faultCode);
+    else if (!panel) blocks[station].block.setState(SIGNATURE);
+  }
+
+  private bool mayMove(int index)
+  {
+    if (!panel) return gameMode == 0 && (blocks[index].kind < 3 || blocks[index].kind == 5);
+    if (blocks[index].kind == 1 && !liftEnabled(index)) return false;
+    if ((flags & 128) != 0 && selected == index) return false;
+    if (index == beforeStation) return mode != 2 && armed && held();
+    if (index == station) return (mode != 2 || selected == station) && armed && !cycleComplete && held() && (flags & 256) != 0;
+    if (blocks[index].kind == 5 && blocks[index].controlSource == station && (blocks[station].state == 4 || blocks[station].state == 10) && (!armed || !held())) return false;
+    if (mode == 0) return blocks[index].kind < 3 || blocks[index].kind == 5;
+    return manualDrive(index);
+  }
+
+  private bool manualDrive(int index)
+  {
+    PanelBlock b = blocks[index];
+    // Manual/Transfer departures use the main pair until the train parks on
+    // the feeder table. They do not require a separate jog at the same time.
+    if (mode != 0 && b.kind == 5 && b.controlSource == station)
+      return armed && held();
+    bool selection = selected == index || selected == b.controlSource;
+    int command = b.kind == 1 ? 16 : 32;
+    return selection && armed && (flags & command) != 0;
+  }
+
+  private bool sectionHasTrain(Section section, int index)
+  {
+    Train[] trains = section.getTrainsOnSection();
+    for (int t = 0; t < trains.length; ++t)
+      if (trains[t].getTrainIndex() == index) return true;
+    return false;
+  }
+
+  private bool sharesStationTrain(int i)
+  {
+    if (i == station || (blocks[station].state != 4 && blocks[station].state != 10 && blocks[station].state != 8)) return false;
+    if (blocks[station].state == 8 && (flags & 1024) != 0 && !held() && blocks[i].state == 9) return false;
+    Train[] trains = blocks[station].section.getTrainsOnSection();
+    for (int t = 0; t < trains.length; ++t)
+      if (sectionHasTrain(blocks[i].section, trains[t].getTrainIndex())) return true;
+    return false;
+  }
+
+  private bool coupledGapClear()
+  {
+    if (departingTrain < 0 || arrivingTrain < 0 || multiGap <= 0 || multiDecel <= 0) return false;
+    Train leaving = coaster.getTrainAt(departingTrain);
+    Train arriving = coaster.getTrainAt(arrivingTrain);
+    if (leaving.getBogieCount() < 1 || arriving.getBogieCount() < 1) return false;
+    Vector3f rear = new Vector3f();
+    Vector3f rearDirection = new Vector3f();
+    Vector3f front = new Vector3f();
+    Vector3f frontDirection = new Vector3f();
+    leaving.getBogieOrientationAndPosition(leaving.getBogieCount() - 1, rearDirection, null, null, rear);
+    arriving.getBogieOrientationAndPosition(0, frontDirection, null, null, front);
+    float dx = rear.x - front.x, dy = rear.y - front.y, dz = rear.z - front.z;
+    float longitudinal = dx * frontDirection.x + dy * frontDirection.y + dz * frontDirection.z;
+    float lateralSquared = dx * dx + dy * dy + dz * dz - longitudinal * longitudinal;
+    float direction = frontDirection.x * rearDirection.x + frontDirection.y * rearDirection.y + frontDirection.z * rearDirection.z;
+    double closing = arriving.getSpeed() - leaving.getSpeed();
+    if (closing < 0) closing = 0;
+    double required = multiGap + closing * closing / (2 * multiDecel) + 0.1 * closing;
+    // This first multi-move implementation only accepts a straight, aligned
+    // approach. Curved/non-collinear ride profiles require a track-distance sensor.
+    return direction >= 0.98f && lateralSquared <= 1.0f && longitudinal >= required;
+  }
+
+  private bool validCoupledOccupancy(int i)
+  {
+    if (i != station || !coupled || blocks[i].state != 10 || fatal ||
+        blocks[i].block.getNumberOfTrainsOnBlock() > 2 || !coupledGapClear()) return false;
+    Train[] trains = blocks[i].section.getTrainsOnSection();
+    if (trains.length > 2) return false;
+    for (int t = 0; t < trains.length; ++t)
+      if (trains[t].getTrainIndex() != departingTrain && trains[t].getTrainIndex() != arrivingTrain) return false;
+    return true;
+  }
+
+  private void tryCoupled()
+  {
+    PanelBlock stationBlock = blocks[station], waiting = blocks[beforeStation];
+    if (coupled || !panel || mode != 0 || multiGap <= 0 || (flags & 512) == 0 ||
+        !armed || !held() || stationBlock.state != 4 || waiting.state != 3 ||
+        stationBlock.destination < 0 || blocks[stationBlock.destination].kind != 5 ||
+        !movingRouteAligned(station) || (flags & 128) != 0) return;
+    Train leaving = stationBlock.section.getTrainOnSection();
+    Train arriving = waiting.section.getTrainOnSection();
+    if (leaving == null || arriving == null || leaving.getTrainIndex() == arriving.getTrainIndex() || leaving.getSpeed() <= 0.1) return;
+    PanelRoute approach = null;
+    for (int r = 0; r < routeCount; ++r)
+      if (routes[r].source == beforeStation && routes[r].destination == station && !routes[r].backwards && routes[r].aligned()) approach = routes[r];
+    if (approach == null) return;
+    departingTrain = leaving.getTrainIndex(); arrivingTrain = arriving.getTrainIndex();
+    if (!coupledGapClear()) { departingTrain = -1; arrivingTrain = -1; return; }
+    coupledApproach = approach;
+    waiting.destination = station; waiting.backwards = false; waiting.state = 4;
+    stationBlock.state = 10; coupled = true;
+  }
+
+  private bool expectedStationOverlap(int i)
+  {
+    PanelBlock b = blocks[i];
+    if (validCoupledOccupancy(i)) return true;
+    if (i != station || !b.physicalClear || b.block.getNumberOfTrainsOnBlock() > 2 ||
+        b.controlSource != beforeStation || !b.singleOccupant() || fatal) return false;
+    Train incoming = b.section.getTrainOnSection();
+    if (incoming == null) incoming = blocks[beforeStation].section.getTrainOnSection();
+    if (incoming == null) return false;
+    for (int r = 0; r < routeCount; ++r)
+    {
+      PanelRoute route = routes[r];
+      if (route.source != station || route.backwards || !route.aligned()) continue;
+      PanelBlock leaving = blocks[route.destination];
+      Train train = leaving.section.getTrainOnSection();
+      if (leaving.kind == 5 && leaving.state == 4 && train != null &&
+          train.getTrainIndex() != incoming.getTrainIndex() && leaving.singleOccupant()) return true;
+    }
+    return false;
+  }
+
+  private bool canReturn(int i)
+  {
+    PanelBlock b = blocks[i];
+    Train train = b.section.getTrainOnSection();
+    if (!b.returnToPark || train == null || train.getHarnessState() > 0.001f ||
+        b.destination < 0 || blocks[b.destination].kind != 5 || !movingRouteAligned(i)) return false;
+    PanelBlock target = blocks[b.destination];
+    Train other = target.section.getTrainOnSection();
+    if (other != null && other.getTrainIndex() != train.getTrainIndex()) return false;
+    if (target.destination >= 0 && !blocks[target.destination].empty()) return false;
+    return true;
+  }
+
+  private void releaseReturnRoute(int i)
+  {
+    PanelBlock b = blocks[i];
+    if (b.destination < 0) return;
+    PanelBlock target = blocks[b.destination];
+    if (target.destination >= 0 && blocks[target.destination].empty())
+      blocks[target.destination].state = 0;
+    target.state = target.empty() ? 0 : 1;
+    target.destination = -1;
+    target.controlSource = -1;
+    target.arrivalRoute = null;
+    b.destination = -1;
+  }
+
+  private void process(int i)
+  {
+    PanelBlock b = blocks[i];
+    Section s = b.section;
+    if (i == station) tryCoupled();
+    if (b.state == 10)
+    {
+      bool aligned = movingRouteAligned(i) && coupledApproach != null && coupledApproach.aligned();
+      if (!sectionHasTrain(s, departingTrain))
+      {
+        coupled = false;
+        departingTrain = -1; arrivingTrain = -1;
+        b.state = panel ? 6 : 1;
+        b.destination = -1;
+        b.controlSource = beforeStation;
+      }
+      else
+      {
+        bool permission = aligned && ((!panel && gameMode == 0) ||
+          (panel && mode == 0 && armed && held() && (flags & 512) != 0 &&
+           (flags & 1024) == 0 && !((flags & 128) != 0 && (selected == station || selected == beforeStation))));
+        if (permission) b.move(false);
+        else { b.stop(); blocks[beforeStation].stop(); if (b.destination >= 0) blocks[b.destination].stop(); }
+        return;
+      }
+    }
+    if (panel && i == station && b.state == 4 && !held() && (flags & 1024) != 0 && canReturn(i))
+    {
+      b.stop();
+      if (b.destination >= 0) blocks[b.destination].stop();
+      Train t = s.getTrainOnSection();
+      if (t != null && t.getSpeed() <= 0.05 && t.getSpeed() >= -0.05)
+      {
+        b.state = 8;
+        blocks[b.destination].state = 9;
+      }
+    }
+    if (b.state == 9) { if (blocks[station].state != 8) b.stop(); return; }
+    if (b.state == 8)
+    {
+      PanelBlock target = b.destination < 0 ? null : blocks[b.destination];
+      if (!panel || !canReturn(i) || held() || (flags & 1024) == 0)
+      { b.stop(); if (target != null) target.stop(); return; }
+      if (!b.parkSection.isTrainBehindEndOfSection(b.parkDistance))
+      {
+        b.stop(); if (target != null) target.stop();
+        Train t = s.getTrainOnSection();
+        if (t != null && t.getSpeed() <= 0.05 && t.getSpeed() >= -0.05)
+        {
+          releaseReturnRoute(i);
+          s.setStationEntering();
+          b.state = 5;
+          cycleComplete = true;
+        }
+      }
+      else { b.move(true); if (target != null) target.move(true); }
+      return;
+    }
+    if (b.state == 4)
+    {
+      bool permission = movingRouteAligned(i);
+      if (panel && selected == i && (flags & 128) != 0) permission = false;
+      if (panel && (i == station || i == beforeStation)) permission = permission && armed && held();
+      if (panel && coupled && i == beforeStation)
+        permission = permission && (flags & 512) != 0 && (flags & 1024) == 0 && movingRouteAligned(station);
+      if (panel && mode != 0 && i != station && i != beforeStation)
+        permission = permission && manualDrive(i);
+      if (b.kind == 1 && !liftEnabled(i)) permission = false;
+      if (panel && b.kind == 5 && b.controlSource == station && (blocks[station].state == 4 || blocks[station].state == 10)) permission = permission && armed && held();
+      if (permission) b.move(b.backwards); else b.stop();
+      if (b.empty())
+      {
+        b.stop();
+        b.state = 0;
+        b.destination = -1;
+        b.controlSource = -1;
+        b.arrivalRoute = null;
+        b.stationReleased = false;
+        if (panel && i == station) cycleComplete = true;
+      }
+      return;
+    }
+    if (b.state == 0)
+    {
+      b.stop();
+      if (b.kind == 1 && liftEnabled(i)) s.setLiftFwdIdleOn();
+      return;
+    }
+    if (b.state == 1)
+    {
+      if (!s.isTrainOnSection())
+      {
+        b.stop();
+        // A reserved destination must bridge tire gaps before the first
+        // bogie reaches its section. Power only follows a still-held source
+        // move on the same aligned reservation; never an unreserved track.
+        if (b.arrivalRoute != null && b.arrivalRoute.aligned() && b.controlSource >= 0 &&
+            blocks[b.controlSource].state == 4 && b.kind != 1 && b.kind != 2)
+        {
+          bool drive = !panel ? (gameMode == 0 || gameMode == 1) :
+            ((b.controlSource == station || b.controlSource == beforeStation) ?
+              armed && held() : mode != 0 && manualDrive(b.controlSource));
+          if (drive) b.move(b.backwards);
+        }
+        if (b.kind == 1 && liftEnabled(i)) s.setLiftFwdIdleOn();
+        return;
+      }
+      if (b.kind == 0)
+      {
+        if (panel)
+        {
+          b.state = 6;
+          b.trainingFailure = 0;
+          if (b.stopTolerance > 0 && trainingEvent(1)) b.trainingFailure = 1;
+          else if (b.stopTimeoutMs > 0 && trainingEvent(2)) b.trainingFailure = 2;
+        }
+        else { s.setStationEntering(); b.state = 5; }
+      }
+      else b.state = 2;
+    }
+    if (b.state == 6)
+    {
+      // The station handler is intentionally not allowed to pull a panel-owned
+      // arrival into the park position without a continuing two-button hold.
+      bool atPark = b.parkSection.isTrainBehindEndOfSection(b.parkDistance);
+      if (b.backwards) atPark = !atPark;
+      bool parkingHeld = armed && (b.backwards && mode == 2 ? manualDrive(i) : held());
+      if (b.trainingFailure == 2 && !atPark)
+      {
+        b.stop();
+        if (panel && armed && held())
+        {
+          if (b.parkFailureStarted == 0) b.parkFailureStarted = simulationTime;
+          if (simulationTime - b.parkFailureStarted >= b.stopTimeoutMs / 1000.0f)
+          { fatal = true; faultCode = 908; }
+        }
+        else b.parkFailureStarted = 0;
+        return;
+      }
+      if (atPark && b.trainingFailure == 1 && panel && armed && held())
+      { b.move(false); return; }
+      if (atPark)
+      {
+        b.stop();
+        Train t = s.getTrainOnSection();
+        if (t != null && t.getSpeed() <= 0.05 && t.getSpeed() >= -0.05)
+        {
+          s.setStationEntering();
+          b.state = 5;
+          cycleComplete = true;
+        }
+      }
+      else if (parkingHeld)
+      {
+        s.setBrakesOff();
+        if (b.backwards) s.setTransportsStandardBwdOn();
+        else s.setTransportsStandardFwdOn();
+        for (int a = 0; a < b.auxiliaryCount; ++a)
+        {
+          b.auxiliary[a].setBrakesOff();
+          if (b.backwards) b.auxiliary[a].setTransportsStandardBwdOn();
+          else b.auxiliary[a].setTransportsStandardFwdOn();
+        }
+      }
+      else b.stop();
+      return;
+    }
+    if (b.kind == 0 && b.state == 5)
+    {
+      // Auxiliary tires/brakes under the same station train must follow its
+      // internal parking handler. The route guard protects table alignment.
+      for (int a = 0; a < b.auxiliaryCount; ++a)
+      {
+        if (s.isBrakesOn())
+        { b.auxiliary[a].setBrakesOn(); b.auxiliary[a].setTransportsOff(); }
+        else
+        { b.auxiliary[a].setBrakesOff(); b.auxiliary[a].setTransportsStandardFwdOn(); }
+      }
+      if (s.isStationWaitingForClearBlock())
+      {
+        if (available(i, false) != null) s.setStationNextBlockClear();
+        else s.setStationNextBlockOccupied();
+      }
+      if (panel && mayMove(i) && dispatchHold >= 1.5f && s.canStationManualDispatch()) s.doStationManualDispatch();
+      if (s.isStationWaitingForAdvance())
+      {
+        if (mayMove(i) && startMove(i, false))
+        {
+          s.setStationLeaving();
+          b.stationReleased = true;
+        }
+        else if (panel || gameMode == 0) s.setStationNextBlockOccupied();
+      }
+      return;
+    }
+    if (b.state == 2)
+    {
+      // The next powered section must not pull the same train out of the
+      // station after either physical departure button has been released.
+      if (panel && b.controlSource >= 0 &&
+          (b.controlSource == station || b.controlSource == beforeStation) &&
+          (blocks[b.controlSource].state == 4 || blocks[b.controlSource].state == 10) && (!armed || !held())) { b.stop(); return; }
+      if (b.arrivalRoute != null && !b.arrivalRoute.aligned()) { b.stop(); return; }
+      bool centeredTransfer = (b.kind == 3 || b.kind == 4 || (b.kind == 5 && mode != 0)) &&
+        (b.backwards ? s.isTrainBeforeCenterOfSection() : s.isTrainBehindCenterOfSection());
+      if (panel && mode != 0 && !manualDrive(i) && !centeredTransfer) { b.stop(); return; }
+      if (b.kind == 1)
+      {
+        if (!s.isTrainBehindLiftTrigger())
+        {
+          if (liftEnabled(i))
+          {
+            if (b.manualLiftIdle) s.setLiftFwdIdleOn(); else s.setLiftFwdOn();
+          }
+          else s.setLiftOff();
+          return;
+        }
+      }
+      else if (b.kind == 5 && (!panel || mode == 0)) { /* circuit pass-through */ }
+      else if (b.kind == 3 || b.kind == 4 || b.kind == 5)
+      {
+        bool atCenter = b.backwards ? s.isTrainBeforeCenterOfSection() : s.isTrainBehindCenterOfSection();
+        if (!atCenter)
+        {
+          if (panel && manualDrive(i)) b.move(b.backwards);
+          else b.stop();
+          return;
+        }
+      }
+      else if (i == beforeStation && !s.isTrainBehindEndOfSection(b.parkDistance))
+      {
+        s.setBrakesTrim();
+        s.setTransportsStandardFwdDependingOnBrake();
+        return;
+      }
+      else if (i != beforeStation && !s.isTrainBehindBrakeTrigger())
+      {
+        s.setBrakesTrim();
+        s.setTransportsStandardFwdDependingOnBrake();
+        return;
+      }
+      b.state = 3;
+      if (b.kind != 5 || (panel && mode != 0)) b.controlSource = -1;
+      b.arrivalRoute = null;
+    }
+    if (b.state == 3)
+    {
+      b.stop();
+      if (b.kind == 3)
+      {
+        Train parked = s.getTrainOnSection();
+        if (parked != null && parked.getSpeed() <= 0.05 && parked.getSpeed() >= -0.05)
+          parked.setLashedToTrack(true);
+      }
+      bool reverse = panel && (flags & 64) != 0;
+      if (mayMove(i) && startMove(i, reverse))
+      {
+        Train t = s.getTrainOnSection();
+        if (t != null && t.isLashedToTrack()) t.setLashedToTrack(false);
+      }
+    }
+  }
+
+  // Game block buttons use NL2's usual one-click move. Physical panel moves
+  // continue to require held inputs and cannot be latched by these callbacks.
+  private void gameAdvance(Block target, bool reverse)
+  {
+    if (panel || handback || reconcileGame || gameMode != 1 || fatal || coaster.isEmergencyStop()) return;
+    for (int i = 0; i < count; ++i)
+    {
+      PanelBlock b = blocks[i];
+      if (b.block != target) continue;
+      if (b.kind == 0)
+      {
+        if (!reverse && b.state == 5 && b.section.isStationWaitingForAdvance() && startMove(i, false))
+          b.section.setStationLeaving();
+      }
+      else if (b.state == 3 && startMove(i, reverse))
+      {
+        Train t = b.section.getTrainOnSection();
+        if (t != null && t.isLashedToTrack()) t.setLashedToTrack(false);
+      }
+    }
+  }
+  public void onAdvanceFWDButton(Block b) { gameAdvance(b, false); }
+  public void onAdvanceBWDButton(Block b) { gameAdvance(b, true); }
+  public void onAutoMode(Coaster c)
+  {
+    if (panel) return;
+    if (gameMode == 2) reconcileGame = true;
+    gameMode = 0;
+  }
+  public void onManualBlockMode(Coaster c)
+  {
+    if (panel) return;
+    if (gameMode == 2) reconcileGame = true;
+    gameMode = 1;
+  }
+  public void onFullManualMode(Coaster c)
+  {
+    if (panel) return;
+    for (int i = 0; i < count; ++i) { blocks[i].stop(); blocks[i].block.setEnableMultipleTrainsOnBlockWarning(true); }
+    gameMode = 2;
+  }
+  public void onExit()
+  {
+    for (int i = 0; i < count; ++i) { blocks[i].stop(); blocks[i].block.setEnableMultipleTrainsOnBlockWarning(true); }
+  }
+}

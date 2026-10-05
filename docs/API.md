@@ -57,7 +57,7 @@ Connection problems raise `OSError` / `ConnectionError`. The game must be in pla
 |---|---|
 | `bridge_info()` | `{name, api, build}`; `api` is 0 for bridges older than API 6. Seat counts need API 7 (1.1.0), `customTrain` API 8 (1.2.0) |
 | `ping()` | `True` |
-| `coasters()` | list of `{index, name, operationMode, scripted, blockMode, estop, ready, trains, sections, stations, specialTracks}` |
+| `coasters()` | list of `{index, name, operationMode, scripted, blockMode, estop, ready, trains, sections, stations, specialTracks, panelFault}` |
 | `coaster(key)` | coaster index |
 | `coaster_info(c)` | `{coaster, sections, stations, specialTracks, tracks}` in one call |
 
@@ -116,6 +116,14 @@ Station operations need manual dispatch and a train stopped in the station, and 
 
 ### Scripted-operation coasters only
 `set_brakes`, `set_lift`, `set_transport`, `scripted_block`, `register_state`, `set_state`, `station_entering`, `station_leaving`, `station_next_clear`, `station_next_occupied`, `section_set`, `section_get`. See [PROTOCOL.md](PROTOCOL.md#raw-section-and-scripted-block-commands).
+
+The reusable in-game controller has a separate [development protocol](../scripted/protocol.md)
+and [installation/acceptance notes](../scripted/README.md). Use `PanelLink` with
+API 10 and controller signature `0x20000003`; do not run a second raw block
+controller alongside it. Its session owns mutations, preserves held controls,
+and reports an independently observed crash as `panelFault=909`. Read-only
+clients can remain connected. Manual/Transfer device parameter changes are
+temporary while this session owns the coaster.
 
 ## Recipes
 

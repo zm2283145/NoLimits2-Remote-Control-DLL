@@ -21,6 +21,7 @@ It works with normal coasters: no park script and no changes to the park file. T
 | `client/nl2bridge_client.py` | Command-line tool for quick tests |
 | `client/nl2_viewer.py` | Read-only live block and train viewer |
 | `controller/` | The NL2 Ride Control Panel (Python/tkinter) |
+| `scripted/` | Development reusable NLVM block controller, ride-profile generator, held-input protocol and panel-session client |
 | `examples/` | Small Python and Node.js programs, plus an Arduino ride control panel (sketch, library and USB serial gateway) |
 | `scriptbuilder/sb_io.py` | Work in progress: joystick / keyboard / Arduino (serial) / Modbus TCP inputs and lamp outputs for physical panels |
 | `docs/` | [API guide](docs/API.md), [wire protocol](docs/PROTOCOL.md), [control panel](docs/CONTROLLER.md), [reverse-engineering notes](docs/RE_NOTES.md) |
@@ -82,7 +83,17 @@ See [docs/CONTROLLER.md](docs/CONTROLLER.md).
 
 ## Building
 
-Version **1.2.1** keeps API 8 and all ride-command behavior. Replies now retry partial socket writes until the complete frame is sent, or close the connection on failure. This prevents truncated frames under socket backpressure. Optional tracing helps distinguish transport failures from game refusals. No game offsets or control logic changed.
+Development version **1.2.5** uses API 10. It adds one-writer panel sessions,
+heartbeat/disconnect restoration of licensed native message suppression, and
+independent crash fault 909 reporting after NL2 stops stepping its script,
+manual lift idle selection, and restoration of temporary manual speed settings.
+Scripted status reads no longer press Forward, and unavailable section coordinates
+serialize as finite values. See [scripted/README.md](scripted/README.md) for the
+in-game controller's live acceptance status and integration limits. The deployed
+PLC/HMI does not yet send this development protocol.
+
+Version **1.2.1** introduced retries of partial socket writes until the complete
+frame is sent, or connection closure on failure. That transport fix is preserved.
 
 The portable transport regression test covers fragmented writes of a maximum-size frame, failures after partial progress, zero-byte sends, and empty output:
 

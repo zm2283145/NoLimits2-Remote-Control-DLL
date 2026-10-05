@@ -1,0 +1,114 @@
+import com.nolimitscoaster.*;
+
+/** A block's controller state is independent of its display/input mailbox. */
+public class PanelBlock
+{
+  public Block block;
+  public Section section;
+  public int kind;
+  public int sectionId;
+  public int state;
+  public int destination = -1;
+  public bool backwards = false;
+  public bool stationReleased = false;
+  public bool liftRestartRequired = false;
+  public bool liftStartReleased = false;
+  public bool previousLiftStart = false;
+  public float parkDistance = 1.0f;
+  public Section parkSection;
+  public int controlSource = -1;
+  public PanelRoute arrivalRoute;
+  public Section[] auxiliary = new Section[8];
+  public int auxiliaryCount = 0;
+  public bool physicalClear = false;
+  public bool returnToPark = false;
+  public bool expectStop = false;
+  public long stopRequestedAt = 0;
+  public int stopTimeoutMs = 0;
+  public float stopTolerance = 0;
+  public int trainingFailure = 0;
+  public float parkFailureStarted = 0;
+  public bool manualLiftIdle = false;
+
+  public PanelBlock(Block b, int k, int id)
+  {
+    block = b;
+    section = b.getSection();
+    parkSection = section;
+    kind = k;
+    sectionId = id;
+    block.registerState(0, "Free", Block.LAMP_OFF);
+    block.registerState(1, "Approaching", Block.LAMP_FLASHING);
+    block.registerState(2, "Entering", Block.LAMP_ON);
+    block.registerState(3, "Waiting", Block.LAMP_ON);
+    block.registerState(4, "Leaving", Block.LAMP_ON);
+    block.registerState(5, "In Station", Block.LAMP_ON);
+    block.registerState(6, "Parking", Block.LAMP_ON);
+    block.registerState(8, "Train reversing", Block.LAMP_FLASHING);
+    block.registerState(9, "Return to station", Block.LAMP_FLASHING);
+    block.registerState(10, "Multi move", Block.LAMP_ON);
+    block.setAdvanceFwdVisible(true);
+    block.setAdvanceBwdVisible(false);
+    if (b.getNumberOfTrainsOnBlock() == 0 && !section.isTrainOnSection()) state = 0;
+    else if (!section.isTrainOnSection()) state = 1;
+    else if (k == 0) state = 5;
+    else state = 3;
+  }
+
+  public bool empty()
+  {
+    if ((!physicalClear && block.getNumberOfTrainsOnBlock() != 0) || section.isTrainOnSection()) return false;
+    for (int i = 0; i < auxiliaryCount; ++i)
+      if (auxiliary[i].isTrainOnSection()) return false;
+    return true;
+  }
+
+  public bool singleOccupant()
+  {
+    if ((!physicalClear && block.getNumberOfTrainsOnBlock() > 1) || section.getTrainsOnSection().length > 1) return false;
+    Train train = section.getTrainOnSection();
+    int index = train == null ? -1 : train.getTrainIndex();
+    for (int i = 0; i < auxiliaryCount; ++i)
+    {
+      if (auxiliary[i].getTrainsOnSection().length > 1) return false;
+      train = auxiliary[i].getTrainOnSection();
+      if (train == null) continue;
+      if (index != -1 && index != train.getTrainIndex()) return false;
+      index = train.getTrainIndex();
+    }
+    return true;
+  }
+
+  public void stop()
+  {
+    expectStop = true;
+    section.setTransportsOff();
+    section.setBrakesOn();
+    section.setLiftOff();
+    for (int i = 0; i < auxiliaryCount; ++i)
+    {
+      auxiliary[i].setTransportsOff();
+      auxiliary[i].setBrakesOn();
+      auxiliary[i].setLiftOff();
+    }
+  }
+
+  public void move(bool reverse)
+  {
+    section.setBrakesTrim();
+    if (reverse) section.setTransportsStandardBwdOn();
+    else section.setTransportsStandardFwdOn();
+    for (int i = 0; i < auxiliaryCount; ++i)
+    {
+      auxiliary[i].setBrakesTrim();
+      if (reverse) auxiliary[i].setTransportsStandardBwdOn();
+      else auxiliary[i].setTransportsStandardFwdOn();
+    }
+    if (kind == 1)
+    {
+      if (reverse) section.setLiftBwdOn();
+      else if (manualLiftIdle) section.setLiftFwdIdleOn();
+      else section.setLiftFwdOn();
+    }
+  }
+}

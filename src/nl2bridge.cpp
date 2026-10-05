@@ -21,11 +21,32 @@
 #include <vector>
 #include <atomic>
 #include <algorithm>
+#include <cmath>
 #include "offsets.h"
 #include "send_all.h"
+#include "panel_session.h"
+#include "panel_crash.h"
+#include "native_attraction.h"
 #undef R_OK   // io.h access() flag, clashes with the reply id below
 
 using namespace nl2;
+static std::atomic<bool> g_run{true};
+static PanelSessions g_sessions;
+static PanelCrashWatch g_crashes;
+static std::atomic<uintptr_t> g_nextClientId{1};
+static std::atomic<bool> g_suppressionApplied{false};
+static std::atomic<unsigned> g_suppressionPort{15151};
+static std::mutex g_suppressionMutex;
+static std::string g_suppressionError;
+// Claims and mutation permission checks stay in the same serialized request
+// transaction as their writes; a new owner cannot race between check and act.
+static std::mutex g_requestMutex;
+struct DeviceOverride {
+  int coaster,section,device;
+  uintptr_t incarnation,deviceObject,owner;
+  double speed,accel,decel;
+};
+static std::vector<DeviceOverride> g_deviceOverrides; // protected by the game lock
 
 // ---------------------------------------------------------------- logging
 static FILE* g_log = nullptr;
@@ -173,6 +194,20 @@ static SectionEntry* FindEntry(uint8_t* c, uint32_t id) {
   for (size_t i = 0; i < n; ++i) if (e[i].id == id) return &e[i];
   return nullptr;
 }
+static void RestoreDeviceOverrides(int ci,uint8_t* c,uintptr_t owner=0) {
+  for (auto it=g_deviceOverrides.begin();it!=g_deviceOverrides.end();) {
+    if (it->coaster!=ci || (owner && it->owner!=owner)) {++it;continue;}
+    if (c && (uintptr_t)c==it->incarnation) {
+      auto entry=FindEntry(c,(uint32_t)it->section);
+      uint8_t* device=entry && entry->section ? Rd<uint8_t*>(entry->section,section::BrakeDev+8*it->device) : nullptr;
+      if (device && (uintptr_t)device==it->deviceObject) {
+        VCall<void(*)(void*,double,double,double)>(device,device::VF_SetParams)(device,it->speed,it->accel,it->decel);
+        Log("Restored manual device parameters c=%d section=%d device=%d",ci,it->section,it->device);
+      }
+    }
+    it=g_deviceOverrides.erase(it);
+  }
+}
 static int SpecialCount(uint8_t* c) {
   return (int)((Rd<uintptr_t>(c, coaster::SpecialEnd) - Rd<uintptr_t>(c, coaster::SpecialBegin)) / 8);
 }
@@ -191,8 +226,17 @@ static bool IsScriptedNode(void* nd) { return nd && VCall<bool(*)(void*)>(nd, no
 // Semi-manual "can advance" - normal and scripted nodes number their ops differently (see offsets.h)
 static bool CanAdvance(void* nd, bool bwd) {
   if (!nd) return false;
+  // Scripted op 2 is a Forward PRESS, not a query. Never call a command from
+  // a status poll: it can enqueue an Advance event and move a manual train.
+  if (IsScriptedNode(nd))
+    return Rd<uint8_t>(nd, bwd ? node::BwdVisible : node::FwdVisible) &&
+           Rd<uint8_t>(nd, bwd ? node::BwdEnabled : node::FwdEnabled);
   auto semi = VCall<int(*)(void*, int)>(nd, node::VF_SemiManual);
-  return semi(nd, IsScriptedNode(nd) ? (bwd ? 3 : 2) : (bwd ? 4 : 1)) != 0;
+  return semi(nd, bwd ? 4 : 1) != 0;
+}
+static bool PressScriptedAdvance(void* nd, bool bwd) {
+  if (!nd || !IsScriptedNode(nd) || !CanAdvance(nd, bwd)) return false;
+  return VCall<int(*)(void*, int)>(nd, node::VF_SemiManual)(nd, bwd ? 5 : 2) != 0;
 }
 static bool SGet(uint8_t* c, uint32_t id, int q, SectionGetResult* r) {
   void* bs = Rd<void*>(c, coaster::BlockSystem);
@@ -332,12 +376,12 @@ static std::string CoasterJson(void* park, int i) {
   size_t ne; Entries(c, &ne);
   char buf[640];
   snprintf(buf, sizeof buf, "{\"index\":%d,\"name\":\"%s\",\"operationMode\":%u,\"scripted\":%d,\"blockMode\":%u,\"estop\":%u,"
-           "\"ready\":%u,\"trains\":%d,\"sections\":%zu,\"stations\":%d,\"specialTracks\":%d}",
+           "\"ready\":%u,\"trains\":%d,\"sections\":%zu,\"stations\":%d,\"specialTracks\":%d,\"panelFault\":%d}",
            i, JsonEsc(ReadStdString(c + coaster::Name)).c_str(),
            Rd<uint8_t>(c, coaster::OperationMode), Rd<uint8_t>(c, coaster::OperationMode) == 2,
            Rd<uint8_t>(c, coaster::BlockMode), Rd<uint8_t>(c, coaster::EStop), Rd<uint8_t>(c, coaster::Ready),
            (int)((Rd<uintptr_t>(c, coaster::TrainsEnd) - Rd<uintptr_t>(c, coaster::TrainsBegin)) / 8),
-           ne, StationCount(c), SpecialCount(c));
+           ne, StationCount(c), SpecialCount(c), g_crashes.fault(i,(uintptr_t)c));
   return buf;
 }
 
@@ -355,6 +399,13 @@ static std::string SectionsJson(uint8_t* c) {
     int adv = (CanAdvance(nd, false) ? 1 : 0) | (CanAdvance(nd, true) ? 2 : 0);
     uint32_t trainMask = (uint32_t)SGetI(c, e[i].id, SG_TRAIN_MASK);
     int userState = scripted ? Rd<int32_t>(nd, node::UserState) : -1;
+    int trackIndex = s ? TrackIndex(c, Rd<void*>(s, section::Track)) : -1;
+    // Unmapped storage/special-track data may contain NaN/Inf in these fields.
+    // Keep the existing numeric schema without emitting invalid JSON tokens.
+    double start = trackIndex >= 0 ? Rd<double>(s, section::TrackStart) : 0.0;
+    double end = trackIndex >= 0 ? Rd<double>(s, section::TrackEnd) : 0.0;
+    if (!std::isfinite(start)) start = 0.0;
+    if (!std::isfinite(end)) end = 0.0;
     char buf[1600];
     snprintf(buf, sizeof buf, "%s{\"id\":%u,\"name\":\"%s\",\"hasNode\":%d,\"isBlock\":%d,\"scripted\":%d,\"station\":%d,"
              "\"nodeType\":\"%s\",\"state\":%u,\"stateName\":\"%s\",\"stateText\":\"%s\",\"lamp\":%u,\"trains\":%u,\"trainMask\":%u,"
@@ -371,8 +422,7 @@ static std::string SectionsJson(uint8_t* c) {
              s ? Rd<uint8_t>(s, section::TransportMode) : -1, userState,
              scripted ? Rd<uint8_t>(nd, node::FwdVisible) : 0, scripted ? Rd<uint8_t>(nd, node::FwdEnabled) : 0,
              scripted ? Rd<uint8_t>(nd, node::BwdVisible) : 0, scripted ? Rd<uint8_t>(nd, node::BwdEnabled) : 0,
-             s ? TrackIndex(c, Rd<void*>(s, section::Track)) : -1,
-             s ? Rd<double>(s, section::TrackStart) : 0.0, s ? Rd<double>(s, section::TrackEnd) : 0.0);
+             trackIndex, start, end);
     j += buf;
   }
   return j + "]";
@@ -546,6 +596,8 @@ enum : uint16_t {
   Q_SET_BLOCK_MODE    = 1130,   // i32 coaster, i32 mode (0 auto, 1 manual block, 2 full manual) -> Int
   Q_SET_ESTOP         = 1131,   // i32 coaster, u8 on -> OK
   Q_RESET_COASTER     = 1132,   // i32 coaster -> OK   (Coaster.requestReset: trains back to start positions)
+  Q_PANEL_SESSION     = 1153,   // i32 coaster, station SID, enable, suppressMessages, nativeTelemetryPort -> OK
+  Q_PANEL_SESSION_STATUS = 1154, // no payload -> JSON (global message suppression status)
   Q_DEVICE_SET        = 1150,   // i32 coaster, i32 sectionId, i32 device (0 brake,1 lift,2 transport), i32 value -> Int (full manual only)
   Q_DEVICE_GET        = 1207,   // i32 coaster, i32 sectionId -> String (JSON: brake/lift/transport device state)
   Q_DEVICE_PARAMS_GET = 1208,   // i32 coaster, i32 sectionId -> String (JSON: lift/transport speed, accel, decel, current)
@@ -600,18 +652,67 @@ static bool RowsStationOp(uint8_t* st, int op, bool* ok, std::string* why) {
   return false;
 }
 
-static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
+static uint16_t Handle(uint16_t id, Reader& r, Writer& w, uintptr_t client) {
   if (!G.ok) { w.str("NL2Bridge: game functions not resolved (see NL2Bridge.log)"); return R_ERROR; }
   std::string err;
   auto fail = [&](const std::string& e) { w.b.clear(); w.str(e); return (uint16_t)R_ERROR; };
   auto intReply = [&](int v) { w.i32(v); return (uint16_t)R_INT; };
 
+  // Claimed panel ownership gates bridge mutations, while reads remain shared.
+  // An emergency-stop assertion is always allowed, including from a spectator.
+  bool mutation = id == Q_BLOCK_SET || id == Q_SECTION_SET || id == Q_BLOCK_ADVANCE ||
+    id == Q_REGISTER_STATE || id == Q_SET_USER_STATE || id == Q_SET_SWITCH ||
+    id == Q_SET_BLOCK_MODE || id == Q_RESET_COASTER || id == Q_DEVICE_SET ||
+    id == Q_DEVICE_PARAMS_SET || id == Q_TRAIN_LASH || id == Q_STATION_OP ||
+    id == Q_STATION_OP_CHECKED || id == Q_ROW_RESTRAINT;
+  Reader probe = r;
+  int ownerCoaster = probe.i32();
+  if (id == Q_SET_ESTOP && !probe.bad) mutation = probe.u8() == 0;
+  if (mutation && !probe.bad && !g_sessions.allowed(ownerCoaster, (uintptr_t)client, GetTickCount64()))
+    return fail("Coaster is owned by another panel connection");
+  if (mutation && !probe.bad && id != Q_RESET_COASTER && id != Q_REGISTER_STATE && id != Q_SET_USER_STATE) {
+    Locked L; uint8_t* c=GetCoaster(ownerCoaster,nullptr);
+    if (c && g_crashes.fault(ownerCoaster,(uintptr_t)c)) return fail("Crash fault 909: reset the coaster before operating");
+  }
+
   switch (id) {
   case Q_PING: return R_OK;
 
   case Q_BRIDGE_INFO:
-    w.str("{\"name\":\"NL2Bridge\",\"api\":8,\"build\":\"1.2.1\"}");
+    w.str("{\"name\":\"NL2Bridge\",\"api\":10,\"build\":\"1.2.5\"}");
     return R_STRING;
+
+  case Q_PANEL_SESSION: {
+    int ci = r.i32(), sid = r.i32(), enabled = r.i32(), suppress = r.i32(), port = r.i32();
+    if (r.bad || (enabled != 0 && enabled != 1) || (suppress != 0 && suppress != 1) ||
+        sid < 1 || sid > 4095 || port < 1 || port > 65535) return fail("Invalid panel session");
+    if (!enabled) {
+      if (!g_sessions.release(ci, (uintptr_t)client)) return fail("Panel session belongs to another connection");
+      Locked L; RestoreDeviceOverrides(ci,GetCoaster(ci,nullptr),client);
+      return R_OK;
+    }
+    Locked L; uint8_t* c = GetCoaster(ci, &err); if (!c) return fail(err);
+    SectionEntry* entry = FindEntry(c, (uint32_t)sid);
+    if (Rd<uint8_t>(c, coaster::OperationMode) != 2 || !entry || !IsScriptedNode(entry->node) ||
+        !SGetI(c, (uint32_t)sid, SG_IS_STATION) || Rd<int32_t>(entry->node, node::UserState) != 0x20000003)
+      return fail("Panel session requires a scripted station block");
+    if (!g_sessions.claim(ci, (uintptr_t)c, (uint32_t)sid, (uintptr_t)client,
+                          suppress != 0, (uint16_t)port, GetTickCount64()))
+      return fail("Another panel owns this coaster or a different telemetry endpoint");
+    g_crashes.watch(ci,(uintptr_t)c,(uint32_t)sid);
+    RestoreDeviceOverrides(ci,c);
+    return R_OK;
+  }
+  case Q_PANEL_SESSION_STATUS: {
+    auto desired = g_sessions.suppression(GetTickCount64());
+    std::string error;
+    { std::lock_guard<std::mutex> lock(g_suppressionMutex); error = g_suppressionError; }
+    w.str(std::string("{\"requested\":") + (desired.requested ? "true" : "false") +
+      ",\"active\":" + (g_suppressionApplied ? "true" : "false") +
+      ",\"nativePort\":" + std::to_string(g_suppressionPort.load()) +
+      ",\"error\":\"" + JsonEsc(error) + "\"}");
+    return R_STRING;
+  }
 
   case Q_DEVICE_PARAMS_GET: {
     int ci = r.i32(), sid = r.i32(); if (r.bad) return fail("Invalid message");
@@ -646,6 +747,17 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
     ac = keep(ac, Rd<double>(dev, device::Accel));
     de = keep(de, Rd<double>(dev, device::Decel));
     if (ac <= 0 || de <= 0) return fail("Acceleration and deceleration must be > 0");
+    auto owners=g_sessions.owners(GetTickCount64());
+    bool manual=std::any_of(owners.begin(),owners.end(),[&](const PanelSessions::Owner& o) {
+      return o.coaster==ci && o.incarnation==(uintptr_t)c && o.owner==client && (o.mode==1 || o.mode==2);
+    });
+    if (manual) {
+      bool captured=std::any_of(g_deviceOverrides.begin(),g_deviceOverrides.end(),[&](const DeviceOverride& v) {
+        return v.coaster==ci && v.incarnation==(uintptr_t)c && v.section==sid && v.device==d && v.deviceObject==(uintptr_t)dev && v.owner==client;
+      });
+      if (!captured) g_deviceOverrides.push_back({ci,sid,d,(uintptr_t)c,(uintptr_t)dev,client,
+        Rd<double>(dev,device::Speed),Rd<double>(dev,device::Accel),Rd<double>(dev,device::Decel)});
+    }
     VCall<void(*)(void*, double, double, double)>(dev, device::VF_SetParams)(dev, sp, ac, de);
     return R_OK;
   }
@@ -810,8 +922,8 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
     Locked L; uint8_t* c = GetCoaster(ci, &err); if (!c) return fail(err);
     SectionEntry* e = FindEntry(c, (uint32_t)sid); if (!e || !e->node) return fail("Unknown block");
     bool ok;
-    if (IsScriptedNode(e->node))   // scripted: same as clicking the panel's Advance button -> event 6/7 for the controller
-      ok = VCall<int(*)(void*, int)>(e->node, node::VF_SemiManual)(e->node, dir == 2 ? 5 : 4) != 0;
+    if (IsScriptedNode(e->node))   // same as clicking Forward/Backward: events 6/7
+      ok = PressScriptedAdvance(e->node, dir == 2);
     else
       ok = VCall<bool(*)(void*, int, unsigned)>(e->node, node::VF_SetState)(e->node, 7, dir == 2 ? 2u : 1u);
     Log("BlockAdvance c=%d id=%d dir=%d -> %d", ci, sid, dir, ok);
@@ -920,8 +1032,23 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
     if (id == Q_REGISTER_STATE)
       VCall<void(*)(void*, int, const char*, uint8_t)>(e->node, node::VF_RegisterState)(e->node, state, text.c_str(),
                                                                                          (uint8_t)(lamp < 0 || lamp > 2 ? 0 : lamp));
-    else
+    else {
+      bool operatingPacket=state >= 0x40000000 && state < 0x42000000;
+      bool panelPacket = operatingPacket || (state >= 0x50000000 && state < 0x50010000) ||
+                         (state >= 0x51000000 && state < 0x51004000);
+      int panelMode=operatingPacket ? ((state-0x40000000)>>11)&3 : -1;
+      if (panelPacket && !g_sessions.input(ci, (uintptr_t)c, (uint32_t)sid,
+                                          (uintptr_t)client, GetTickCount64(),panelMode))
+        return fail("Panel session changed; reconnect and claim the current coaster");
+      if (operatingPacket && panelMode!=1 && panelMode!=2) RestoreDeviceOverrides(ci,c,client);
+      if (g_crashes.fault(ci,(uintptr_t)c)) {
+        // Keep the connection alive for reporting/suppression without letting
+        // an input mailbox overwrite the crash fault after NLVM has stopped.
+        if (!panelPacket) return fail("Crash fault 909: reset the coaster before operating");
+        return R_OK;
+      }
       VCall<void(*)(void*, int)>(e->node, node::VF_SetUserState)(e->node, state);
+    }
     return R_OK;
   }
 
@@ -972,6 +1099,7 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
   case Q_SET_ESTOP: {
     int ci = r.i32(); uint8_t on = r.u8(); if (r.bad) return fail("Invalid message");
     Locked L; uint8_t* c = GetCoaster(ci, &err); if (!c) return fail(err);
+    if (!on && g_crashes.fault(ci,(uintptr_t)c)) return fail("Crash fault 909 requires a coaster reset");
     G.SetEStop(c, on ? 1 : 0);
     return R_OK;
   }
@@ -980,6 +1108,8 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
     int ci = r.i32(); if (r.bad) return fail("Invalid message");
     if (!G.resetPending) return fail("Reset not available in this game version");
     Locked L; uint8_t* c = GetCoaster(ci, &err); if (!c) return fail(err);
+    g_crashes.beginReset(ci,(uintptr_t)c);
+    RestoreDeviceOverrides(ci,c);
     c[coaster::ResetRequest] = 1;
     __atomic_exchange_n(G.resetPending, (char)1, __ATOMIC_SEQ_CST);
     Log("ResetCoaster c=%d", ci);
@@ -1036,11 +1166,11 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
 }
 
 // ---------------------------------------------------------------- server
-static std::atomic<bool> g_run{true};
 static SOCKET g_listen = INVALID_SOCKET;
 
 static DWORD WINAPI ClientThread(LPVOID p) {
   SOCKET s = (SOCKET)(uintptr_t)p;
+  uintptr_t client = g_nextClientId.fetch_add(1);
   std::vector<uint8_t> in; uint8_t buf[4096];
   while (g_run) {
     int n = recv(s, (char*)buf, sizeof buf, 0);
@@ -1058,7 +1188,8 @@ static DWORD WINAPI ClientThread(LPVOID p) {
       Reader r{in.data() + 9, sz};
       Writer w;
       const ULONGLONG started = GetTickCount64();
-      uint16_t rid = Handle(id, r, w);
+      uint16_t rid;
+      {std::lock_guard<std::mutex> transaction(g_requestMutex);rid=Handle(id,r,w,client);}
       if (g_trace) Log("tcp socket=%llu query=%u request=%u bytes=%u reply=%u replyBytes=%zu ms=%llu",
         (unsigned long long)s, id, req, sz, rid, w.b.size(), (unsigned long long)(GetTickCount64()-started));
       if (rid == R_ERROR) Log("query %u error: %.*s", id, (int)w.b.size(), (const char*)w.b.data());
@@ -1073,7 +1204,92 @@ static DWORD WINAPI ClientThread(LPVOID p) {
       break;
     }
   }
+  g_sessions.disconnect(client);
   closesocket(s);
+  return 0;
+}
+
+// Runs independently of PC/PLC client threads, so a dropped connection or
+// missing heartbeat restores normal NL2 messages even if the client process dies.
+static DWORD WINAPI PanelCrashThread(LPVOID) {
+  while (g_run) {
+    {
+      std::lock_guard<std::mutex> transaction(g_requestMutex);
+      Locked L;
+      auto now=GetTickCount64();
+      auto owners=g_sessions.owners(now);
+      for (size_t i=0;i<g_deviceOverrides.size();) {
+        auto saved=g_deviceOverrides[i];
+        bool manual=std::any_of(owners.begin(),owners.end(),[&](const PanelSessions::Owner& o) {
+          return o.coaster==saved.coaster && o.incarnation==saved.incarnation && o.owner==saved.owner && (o.mode==1 || o.mode==2);
+        });
+        if (manual) {++i;continue;}
+        RestoreDeviceOverrides(saved.coaster,GetCoaster(saved.coaster,nullptr),saved.owner);
+        i=0;
+      }
+      for (auto& ride:g_crashes.records()) {
+        uint8_t* c=GetCoaster(ride.coaster,nullptr);
+        if (!c || (uintptr_t)c!=ride.incarnation) continue;
+        bool owned=std::any_of(owners.begin(),owners.end(),[&](const PanelSessions::Owner& o) {
+          return o.coaster==ride.coaster && o.incarnation==ride.incarnation;
+        });
+        int previous=ride.fault;
+        PanelCrashWatch::observe(ride,owned,Rd<uint8_t>(c,coaster::Ready)!=0,Rd<uint8_t>(c,coaster::BlockMode),now);
+        if (ride.fault && !ride.resetting) {
+          if (!previous) Log("Panel crash fault 909 c=%d (NLVM stopped)",ride.coaster);
+          G.SetEStop(c,1);
+          void* bs=Rd<void*>(c,coaster::BlockSystem);
+          size_t n;auto entries=Entries(c,&n);
+          if (bs && Rd<uint8_t>(c,coaster::OperationMode)==2) for (size_t i=0;i<n;++i) {
+            G.SectionSet(bs,entries[i].id,CMD_TRANSPORT_OFF,0);
+            G.SectionSet(bs,entries[i].id,CMD_BRAKES_ON,0);
+            G.SectionSet(bs,entries[i].id,CMD_LIFT_OFF,0);
+          }
+          auto station=FindEntry(c,ride.station);
+          if (station && IsScriptedNode(station->node))
+            VCall<void(*)(void*,int)>(station->node,node::VF_SetUserState)(station->node,0x20010000+909);
+        }
+      }
+    }
+    Sleep(50);
+  }
+  return 0;
+}
+
+static DWORD WINAPI SuppressionThread(LPVOID) {
+  NativeAttractionConnection connection;
+  ULONGLONG retryAt = 0;
+  ULONGLONG keepAliveAt=0;
+  bool needsRestore=false;
+  while (g_run) {
+    ULONGLONG now = GetTickCount64();
+    auto desired = g_sessions.suppression(now);
+    bool applied = g_suppressionApplied;
+    unsigned port = g_suppressionPort;
+    if (applied && now>=keepAliveAt && desired.requested && port==desired.port) {
+      std::string error;
+      if (!connection.keepAlive(error)) {
+        g_suppressionApplied=false;applied=false;
+        {std::lock_guard<std::mutex> lock(g_suppressionMutex);g_suppressionError=error;}
+      }
+      keepAliveAt=GetTickCount64()+1000;
+    }
+    if (now >= retryAt && ((needsRestore && (!desired.requested || port != desired.port)) ||
+                          (!applied && desired.requested))) {
+      bool enable = desired.requested && (!needsRestore || port==desired.port);
+      unsigned endpoint = enable ? desired.port : port;
+      std::string error;
+      bool success = connection.set((uint16_t)endpoint, enable, error);
+      { std::lock_guard<std::mutex> lock(g_suppressionMutex); g_suppressionError = error; }
+      if (success) {
+        g_suppressionPort = endpoint; g_suppressionApplied = enable;
+        needsRestore=enable;keepAliveAt=GetTickCount64()+1000;
+        Log("Native Attraction Mode %s on port %u", enable ? "enabled" : "restored off", endpoint);
+        retryAt = 0;
+      } else { Log("Native Attraction Mode unavailable: %s", error.c_str()); retryAt = GetTickCount64() + 2000; }
+    }
+    Sleep(50);
+  }
   return 0;
 }
 
@@ -1081,6 +1297,10 @@ static int g_port = 15152;
 
 static DWORD WINAPI ServerThread(LPVOID) {
   WSADATA wd; WSAStartup(MAKEWORD(2, 2), &wd);
+  if (G.ok) {
+    CloseHandle(CreateThread(nullptr, 0, PanelCrashThread, nullptr, 0, nullptr));
+    CloseHandle(CreateThread(nullptr, 0, SuppressionThread, nullptr, 0, nullptr));
+  }
   int port = g_port;
   if (const char* e = getenv("NL2BRIDGE_PORT")) port = atoi(e);
   g_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -1110,7 +1330,7 @@ static DWORD WINAPI InitThread(LPVOID self) {
   g_trace = GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
   wcscpy(dot, L".log");
   g_log = _wfopen(path, L"a");
-  Log("NL2Bridge 1.2.1 starting (API 8), port %d", g_port);
+  Log("NL2Bridge 1.2.5 starting (API 10), port %d", g_port);
   if (g_trace) Log("TCP diagnostic tracing enabled");
   ResolveAll();
   Log(G.ok ? "all symbols resolved" : "WARNING: some symbols missing - requests will be refused");

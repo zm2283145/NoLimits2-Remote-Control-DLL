@@ -129,8 +129,9 @@ namespace node {
   constexpr int VF_IsScripted   = 0x88; // bool (node)
   constexpr int VF_GetStation   = 0x90; // Station* (node) or null
   constexpr int VF_SemiManual   = 0xa8; // normal nodes: int (node, op) 1=canFwd 2=doFwd 4=canBwd 5=doBwd
-                                        // scripted nodes: 0/1 fwd/bwd button visible, 2/3 can fwd/bwd,
-                                        //                 4/5 PRESS fwd/bwd (pushes coaster event 6/7)
+                                        // scripted nodes: 0=fwd visible, 1=canFwd, 2=PRESS fwd,
+                                        //                 3=bwd visible, 4=canBwd, 5=PRESS bwd
+                                        // PRESS pushes coaster event 6/7. Status polls read flags directly.
   // Scripted block nodes only (NLScriptedBlockNode / NLScriptedStationBlockNode), script Block API:
   constexpr int VF_RegisterState = 0x60; // void (node, int state, const char* text, uint8 lamp 0 off/1 on/2 flash)
   constexpr int VF_SetUserState  = 0x68; // void (node, int state)     Block.setState

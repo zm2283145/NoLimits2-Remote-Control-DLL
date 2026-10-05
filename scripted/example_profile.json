@@ -1,0 +1,17 @@
+{
+  "name": "Single station example: configure IDs and parking for your ride",
+  "before_station": "Waiting Brake",
+  "blocks": [
+    {"name": "Station", "id": 1, "type": "station", "physical_clear": true,
+     "return_to_park": true, "park_distance": 1.0, "stop_timeout_ms": 6000},
+    {"name": "Lift", "id": 2, "type": "lift", "stop_timeout_ms": 10000},
+    {"name": "Waiting Brake", "id": 3, "type": "brake", "park_distance": 1.0,
+     "stop_timeout_ms": 6000}
+  ],
+  "routes": [
+    {"from": "Station", "to": "Lift"},
+    {"from": "Lift", "to": "Waiting Brake"},
+    {"from": "Waiting Brake", "to": "Station"}
+  ],
+  "lift_to_block_timeout": 70.0
+}

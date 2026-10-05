@@ -1,0 +1,24 @@
+import com.nolimitscoaster.*;
+
+public class PanelRoute
+{
+  public int source;
+  public int destination;
+  public bool backwards;
+  public SpecialTrack track;
+  public int position;
+
+  public PanelRoute(int s, int d, bool b, SpecialTrack t, int p)
+  {
+    source = s;
+    destination = d;
+    backwards = b;
+    track = t;
+    position = p;
+  }
+
+  public bool aligned()
+  {
+    return track == null || track.getSwitchDirection() == position;
+  }
+}

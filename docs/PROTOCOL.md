@@ -98,7 +98,7 @@ The position flags are the game's own `Section.isTrainBefore/Behind*` queries, t
 | 1131 | i32 coaster, u8 on | OK. Emergency stop on/off. |
 | 1132 | i32 coaster | OK. Simulation reset (`Coaster.requestReset`): trains back to their start positions, block mode back to Auto. Only runs while the game is simulating; a minimized NL2 window is paused. |
 
-### Development panel sessions (API 9+, controller revision requires API 10)
+### Development panel sessions (API 9+, current controller requires API 11)
 
 | Id | Request | Reply |
 |---|---|---|

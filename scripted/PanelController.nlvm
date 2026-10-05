@@ -54,7 +54,7 @@ public class PanelController extends Script implements BlockSystemController
   private static final int INPUT_BASE = 1073741824;
   private static final int INPUT_END = 1107296256;
   private static final int FAULT_BASE = 536936448;
-  private static final int SIGNATURE = 536870915; // protocol 3 plus manual lift configuration
+  private static final int SIGNATURE = 536870916; // protocol 3 with manual device configuration
 
   public bool onInit()
   {
@@ -287,6 +287,16 @@ public class PanelController extends Script implements BlockSystemController
   private void inputs(long now)
   {
     int packet = blocks[station].block.getState();
+    if (packet >= 0x52000000 && packet < 0x52004000 && panel)
+    {
+      int data = packet - 0x52000000;
+      int id = data >> 2;
+      int request = data & 3;
+      for (int i = 0; i < count; ++i)
+        if (blocks[i].sectionId == id && blocks[i].kind >= 2 && request <= 2)
+          blocks[i].manualBrake = mode == 1 ? request - 1 : -1;
+      heartbeat = now;
+    }
     if (packet >= 0x51000000 && packet < 0x51004000 && panel)
     {
       int data = packet - 0x51000000;
@@ -312,9 +322,11 @@ public class PanelController extends Script implements BlockSystemController
       flags = data & 2047;
       mode = (data >> 11) & 3;
       int selectedId = (data >> 13) & 4095;
+      int oldSelection = selected;
       selected = -1;
       for (int i = 0; i < count; ++i)
         if (blocks[i].sectionId == selectedId) selected = i;
+      if (oldSelection >= 0 && oldSelection != selected) blocks[oldSelection].manualBrake = -1;
       heartbeat = now;
       if (!panel)
       {
@@ -351,7 +363,8 @@ public class PanelController extends Script implements BlockSystemController
     }
     if (panel != previousPanel || (panel && mode != previousMode))
     {
-      for (int i = 0; i < count; ++i) blocks[i].manualLiftIdle = false;
+      for (int i = 0; i < count; ++i)
+      { blocks[i].manualLiftIdle = false; blocks[i].manualBrake = -1; }
       armed = false;
       dispatchHold = 0;
       previousPanel = panel;
@@ -484,7 +497,11 @@ public class PanelController extends Script implements BlockSystemController
       }
       b.expectStop = false;
       if (stopped || (panel && !held() && sharesStationTrain(i))) b.stop();
-      else process(i);
+      else
+      {
+        process(i);
+        applyManualBrake(i);
+      }
       bool manualGame = !panel && !handback && gameMode == 1;
       bool ready = b.state == 3 || (b.kind == 0 && b.state == 5 && b.section.isStationWaitingForAdvance());
       b.block.setAdvanceFwdEnabled(!stopped && manualGame && ready && available(i, false) != null);
@@ -526,6 +543,7 @@ public class PanelController extends Script implements BlockSystemController
 
   private bool mayMove(int index)
   {
+    if (panel && mode == 1 && blocks[index].manualBrake == 0) return false;
     if (!panel) return gameMode == 0 && (blocks[index].kind < 3 || blocks[index].kind == 5);
     if (blocks[index].kind == 1 && !liftEnabled(index)) return false;
     if ((flags & 128) != 0 && selected == index) return false;
@@ -539,6 +557,8 @@ public class PanelController extends Script implements BlockSystemController
   private bool manualDrive(int index)
   {
     PanelBlock b = blocks[index];
+    if (mode == 1 && (b.manualBrake == 0 ||
+        (b.controlSource >= 0 && blocks[b.controlSource].manualBrake == 0))) return false;
     // Manual/Transfer departures use the main pair until the train parks on
     // the feeder table. They do not require a separate jog at the same time.
     if (mode != 0 && b.kind == 5 && b.controlSource == station)
@@ -546,6 +566,31 @@ public class PanelController extends Script implements BlockSystemController
     bool selection = selected == index || selected == b.controlSource;
     int command = b.kind == 1 ? 16 : 32;
     return selection && armed && (flags & command) != 0;
+  }
+
+  private void applyManualBrake(int index)
+  {
+    PanelBlock b = blocks[index];
+    if (!panel || mode != 1 || selected != index || b.kind < 2 ||
+        b.manualBrake < 0 || !armed || !enabled() || fatal ||
+        coaster.isEmergencyStop() || (flags & 128) != 0) return;
+    if (b.manualBrake == 0) { b.stop(); return; }
+    // Open an empty block without powering its tires. Incoming trains still use
+    // the parking handler; an open request never bypasses arrival control.
+    if (b.state == 0 && b.empty())
+    { b.section.setBrakesOff(); b.expectStop = false; return; }
+    if (index == beforeStation && !held()) return;
+    // A parked train can coast only after reserving an aligned, clear route.
+    if (b.state == 3)
+    {
+      if (!startMove(index, (flags & 64) != 0)) return;
+      Train t = b.section.getTrainOnSection();
+      if (t != null && t.isLashedToTrack()) t.setLashedToTrack(false);
+    }
+    if (b.state != 4 || !movingRouteAligned(index)) return;
+    b.section.setBrakesOff();
+    if ((flags & 32) == 0) b.section.setTransportsOff();
+    b.expectStop = false;
   }
 
   private bool sectionHasTrain(Section section, int index)
@@ -772,6 +817,7 @@ public class PanelController extends Script implements BlockSystemController
           bool drive = !panel ? (gameMode == 0 || gameMode == 1) :
             ((b.controlSource == station || b.controlSource == beforeStation) ?
               armed && held() : mode != 0 && manualDrive(b.controlSource));
+          if (panel && mode == 1 && blocks[b.controlSource].manualBrake == 0) drive = false;
           if (drive) b.move(b.backwards);
         }
         if (b.kind == 1 && liftEnabled(i)) s.setLiftFwdIdleOn();
@@ -797,6 +843,7 @@ public class PanelController extends Script implements BlockSystemController
       bool atPark = b.parkSection.isTrainBehindEndOfSection(b.parkDistance);
       if (b.backwards) atPark = !atPark;
       bool parkingHeld = armed && (b.backwards && mode == 2 ? manualDrive(i) : held());
+      if (panel && mode == 1 && b.controlSource >= 0 && blocks[b.controlSource].manualBrake == 0) parkingHeld = false;
       if (b.trainingFailure == 2 && !atPark)
       {
         b.stop();

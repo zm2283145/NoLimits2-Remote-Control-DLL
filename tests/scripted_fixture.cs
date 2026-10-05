@@ -240,6 +240,49 @@ public static class Acceptance {
       Check(S("Table").transport==1,"manual feeder required extra jog");
       Send(c,23,mode:1);Check(S("Table").transport==0,"manual feeder ignored main button release");
     });
+    Test("Manual empty brake opens independently and closes without tire movement",()=>{
+      var c=Init(transit:true);Send(c,3,mode:1,selected:38);
+      B("Station").state=0x52000000+(38<<2)+2;Frame(c);
+      Check(!S("Table").brakes&&S("Table").transport==0,"empty manual brake did not open independently");
+      Send(c,3,mode:1,selected:38);Check(!S("Table").brakes,"brake setting lost after heartbeat");
+      B("Station").state=0x52000000+(38<<2)+1;Frame(c);
+      Check(S("Table").brakes&&S("Table").transport==0,"manual brake did not close");
+      B("Station").state=0x52000000+(38<<2)+2;Frame(c);
+      Send(c,3,mode:1,selected:33);Send(c,3,mode:1,selected:38);
+      Check(S("Table").brakes,"selection change retained an open override");
+      Send(c,3,mode:0,selected:38);Check(S("Table").brakes,"Auto retained manual brake override");
+    });
+    Test("Manual occupied brake reserves destination before opening and preserves held jog",()=>{
+      var c=Init(transit:true);TestHost.World.SetTrain("Station",-1);TestHost.World.SetTrain("Table",0);
+      Send(c,3,mode:1,selected:38);Send(c,3,mode:1,selected:38);
+      Check(B("Table").state==3,"table did not park for manual test");
+      B("Station").state=0x52000000+(38<<2)+2;Frame(c);
+      Frame(c);
+      Check(!S("Table").brakes&&S("Table").transport==0&&B("Lift").state==1,"brake release lacked reservation or powered tires");
+      Send(c,3+32,mode:1,selected:38);Check(S("Table").transport==1,"held manual jog failed");
+      Send(c,3,mode:1,selected:38);Check(S("Table").transport==0&&!S("Table").brakes,"jog release failed or erased brake setting");
+      B("Station").state=0x52000000+(38<<2)+1;Frame(c);
+      Check(S("Table").brakes&&S("Table").transport==0,"manual close failed during reserved move");
+    });
+    Test("Manual brake cannot bypass occupied destination, block hold or station advance pair",()=>{
+      var c=Init(transit:true);TestHost.World.SetTrain("Station",-1);TestHost.World.SetTrain("Table",0);TestHost.World.SetTrain("Lift",1);TestHost.World.SetTrain("Brake",-1);
+      Send(c,3,mode:1,selected:38);Send(c,3,mode:1,selected:38);
+      B("Station").state=0x52000000+(38<<2)+2;Frame(c);
+      Check(S("Table").brakes&&B("Table").state==3,"manual brake released into occupied lift");
+      TestHost.World.SetTrain("Lift",-1);Send(c,3+128,mode:1,selected:38);
+      Check(S("Table").brakes,"block hold failed to override brake open");
+      c=Init();TestHost.World.SetTrain("Station",-1);Send(c,3,mode:1,selected:22);
+      B("Station").state=0x52000000+(22<<2)+2;Frame(c);
+      Check(S("Brake").brakes&&B("Brake").state==3,"manual brake bypassed station advance pair");
+    });
+    Test("Closing a manual waiting brake stops the same train's station parking tires",()=>{
+      var c=Init();TestHost.World.SetTrain("Station",-1);
+      Send(c,3,mode:1,selected:22);Send(c,15,mode:1,selected:22);Send(c,15,mode:1,selected:22);
+      TestHost.World.SetTrain("Station",1);Send(c,15,mode:1,selected:22);
+      Check(S("Station").transport==1,"fixture train did not start parking");
+      B("Station").state=0x52000000+(22<<2)+1;Frame(c);
+      Check(S("Station").transport==0&&S("Brake").transport==0,"closed brake left arrival tires pulling");
+    });
     Test("Transfer departure needs station selection and pair; table parks instead of passing through",()=>{
       var c=Init(transit:true);S("Table").behindCenter=false;
       Send(c,19,mode:2,selected:38);Send(c,31,mode:2,selected:38);
@@ -276,7 +319,7 @@ public static class Acceptance {
     });
     Test("Controller remains identifiable during handback blocked by transfer alignment",()=>{
       var c=Init(transit:true);Send(c,3,mode:2);TestHost.World.coaster.track.position=0;
-      Frame(c,900);Check(B("Station").state==0x20000003,"blocked handback hid controller signature");
+      Frame(c,900);Check(B("Station").state==0x20000004,"blocked handback hid controller signature");
       Send(c,31,mode:2);Check(S("Station").transport==0,"held reconnect bypassed release");
     });
     Test("Selected trigger-next missed park produces 908 on arrival",()=>{

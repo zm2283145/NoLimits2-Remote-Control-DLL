@@ -31,7 +31,7 @@ write it through 1113. Claim an API 9 panel session first. The bridge rejects
 competing writers while the claim is active; a production integration must also
 serialize its own writes and disable competing output controllers.
 
-The script's idle signature is station state `0x20000003`. It must be observed
+The script's idle signature is station state `0x20000004`. It must be observed
 before attaching a development client; never send this protocol to another
 script merely because the coaster uses Scripted operation. The version change
 prevents a older client from silently using the new bit layout. Compute
@@ -79,9 +79,9 @@ consumption.
 
 ## Bridge connection ownership (API 9)
 
-API 10 / bridge 1.2.5 requires signature revision 3 for new claims. The main
-Protocol 3 input bit layout remains unchanged; revision 3 adds the manual-lift
-mailbox below and restoration of temporary manual device parameters.
+API 11 / bridge 1.2.6 requires signature revision 4 for new claims. The main
+Protocol 3 input bit layout remains unchanged. Revision 3 introduced manual lift
+configuration and temporary parameter restoration; revision 4 adds manual brakes.
 
 Message 1153 takes five big-endian signed 32-bit integers:
 `coasterIndex, stationSectionId, enabled, suppressMessages, nativeTelemetryPort`.
@@ -123,6 +123,22 @@ once per changed device. Returning to Auto/Hold, release, lease expiry, TCP
 disconnect, or reset restores them. Repeated changes do not replace the original
 snapshot. A changed coaster or device object is never restored through a stale
 pointer. Legacy unclaimed calls keep their previous API behavior.
+
+## Manual brake configuration (signature revision 4 / API 11)
+
+Register/write station state `0x52000000 + (sectionId << 2) + request`:
+0 restores automatic brake behavior, 1 closes brakes, 2 opens brakes.
+Only existing panel leases in Manual mode consume this setting. Station and
+lift sections do not accept it. Hide it when the selected section has no brake.
+Mode changes, panel loss, and selection changes clear the override.
+
+An empty section's brake can open with tires stopped. Incoming trains retain
+automatic parking control. An occupied parked section reserves an aligned,
+clear destination before releasing its brake. Tires still require held Jog;
+closing the brake inhibits Jog and destination tires pulling the same train.
+The waiting brake still requires the main held Advance/Dispatch pair to release
+a train toward the station. Ride stop, fault, E-stop and Block Hold override
+the setting. Brake release can allow a train to coast even with tires off.
 
 ## Crash fault while NLVM is offline
 

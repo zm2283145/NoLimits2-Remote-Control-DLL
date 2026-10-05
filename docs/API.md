@@ -119,7 +119,7 @@ Station operations need manual dispatch and a train stopped in the station, and 
 
 The reusable in-game controller has a separate [development protocol](../scripted/protocol.md)
 and [installation/acceptance notes](../scripted/README.md). Use `PanelLink` with
-API 10 and controller signature `0x20000003`; do not run a second raw block
+API 11 and controller signature `0x20000004`; do not run a second raw block
 controller alongside it. Its session owns mutations, preserves held controls,
 and reports an independently observed crash as `panelFault=909`. Read-only
 clients can remain connected. Manual/Transfer device parameter changes are

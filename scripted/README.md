@@ -66,7 +66,7 @@ connection also needs to be working for final hardware acceptance.
 
 This is development software, not the deployed PLC/HMI revision. NL2 compiles
 and runs the controller on the three-train Fury development copy. Twenty
-profile validation tests and 46 controller decision fixtures pass. Fixtures
+profile validation tests and 50 controller decision fixtures pass. Fixtures
 execute the actual controller against mock APIs; they do not prove physics.
 The bridge fixture verifies 3,200 status reads without pressing Advance.
 
@@ -122,6 +122,12 @@ Live acceptance recorded locally:
 * Manual station departure uses the main held pair to pull the entire train
   onto the feeder table and park it. A live check exposed an extra-jog requirement
   in this path; the corrected source passes both its regression and live test.
+* Manual brakes open/close on an empty fitted section with tires stopped.
+  A parked train's release reserves the next block first; an occupied destination
+  refuses release. Closing the brake prevents tire jog. Held forward Jog powers
+  the fitted tires, release turns tires off, and brake closure stops the train.
+  Station advance still requires the main pair. The new mailbox is described in
+  [protocol.md](protocol.md#manual-brake-configuration-signature-revision-4--api-11).
 
 The Fury profile includes the circuit and three storage tracks.
 No deployed PLC/HMI sends the development protocol yet. Four remote positions,
@@ -176,7 +182,7 @@ checking those fields. Normal-mode availability queries remain operations 1/4.
 Unknown section coordinates serialize as finite zero values, avoiding invalid
 JSON from uninitialized storage-track coordinates. API version remains 8.
 
-## Bridge 1.2.5 panel sessions, manual parameters and crash observer (API 10)
+## Bridge 1.2.6 panel sessions, manual devices and crash observer (API 11)
 
 The development PanelLink requires controller signature revision 3 and claims a coaster before sending held inputs. Claims
 expire after 750 ms without an input heartbeat. Release and disconnect restore

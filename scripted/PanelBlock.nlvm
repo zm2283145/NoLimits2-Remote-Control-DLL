@@ -29,6 +29,7 @@ public class PanelBlock
   public int trainingFailure = 0;
   public float parkFailureStarted = 0;
   public bool manualLiftIdle = false;
+  public int manualBrake = -1; // -1 automatic, 0 closed, 1 open
 
   public PanelBlock(Block b, int k, int id)
   {

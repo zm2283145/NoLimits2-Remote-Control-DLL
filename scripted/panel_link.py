@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
 from nl2bridge import NL2Error
 
-SIGNATURE = 0x20000003
+SIGNATURE = 0x20000004
 INPUT_BASE = 0x40000000
 
 
@@ -18,8 +18,8 @@ class PanelLink:
         station = next((s for s in sections if s["id"] == station_section), None)
         if not info["scripted"] or not station or station["userState"] != SIGNATURE:
             raise NL2Error("Reusable in-game controller signature is not present")
-        if bridge.bridge_info().get("api", 0) < 10:
-            raise NL2Error("This controller requires NL2Bridge API 10 or newer")
+        if bridge.bridge_info().get("api", 0) < 11:
+            raise NL2Error("This controller requires NL2Bridge API 11 or newer")
         bridge.panel_session(coaster, station_section, suppress_messages=suppress_messages,
                              telemetry_port=telemetry_port)
         self.registered = set()
@@ -89,3 +89,24 @@ class PanelLink:
             self.bridge.register_state(self.coaster,self.station,state,"Manual lift configuration","off")
             self.registered.add(state)
         self.bridge.set_state(self.coaster,self.station,state)
+
+    def configure_brake(self, section, *, open=None):
+        """Manual brake selection; None restores automatic brake control.
+
+        A parked train is released only with an aligned, free destination.
+        Tires still require the held jog command. Station brakes belong to
+        dispatch/parking controls and cannot be opened with this command.
+        """
+        if self.released:
+            raise NL2Error("Panel session was released; reconnect before sending")
+        if not isinstance(section, int) or not 1 <= section <= 4095:
+            raise ValueError("Invalid brake section ID")
+        _, sections = self.bridge.section_detail(self.coaster)
+        fitted = next((s for s in sections if s['id'] == section), None)
+        if not fitted or fitted['isStation'] or not self.bridge.devices(self.coaster, section)['brake']['present']:
+            raise NL2Error("Selected section has no independently controlled brake")
+        state = 0x52000000 + (section << 2) + (0 if open is None else 2 if open else 1)
+        if state not in self.registered:
+            self.bridge.register_state(self.coaster, self.station, state, "Manual brake configuration", "off")
+            self.registered.add(state)
+        self.bridge.set_state(self.coaster, self.station, state)

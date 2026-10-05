@@ -83,10 +83,11 @@ See [docs/CONTROLLER.md](docs/CONTROLLER.md).
 
 ## Building
 
-Development version **1.2.5** uses API 10. It adds one-writer panel sessions,
+Development version **1.2.6** uses API 11. It adds one-writer panel sessions,
 heartbeat/disconnect restoration of licensed native message suppression, and
 independent crash fault 909 reporting after NL2 stops stepping its script,
-manual lift idle selection, and restoration of temporary manual speed settings.
+manual lift idle selection, independent manual brake selection with route
+interlocks, and restoration of temporary manual speed settings.
 Scripted status reads no longer press Forward, and unavailable section coordinates
 serialize as finite values. See [scripted/README.md](scripted/README.md) for the
 in-game controller's live acceptance status and integration limits. The deployed

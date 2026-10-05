@@ -679,7 +679,7 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w, uintptr_t client) {
   case Q_PING: return R_OK;
 
   case Q_BRIDGE_INFO:
-    w.str("{\"name\":\"NL2Bridge\",\"api\":10,\"build\":\"1.2.5\"}");
+    w.str("{\"name\":\"NL2Bridge\",\"api\":11,\"build\":\"1.2.6\"}");
     return R_STRING;
 
   case Q_PANEL_SESSION: {
@@ -694,7 +694,7 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w, uintptr_t client) {
     Locked L; uint8_t* c = GetCoaster(ci, &err); if (!c) return fail(err);
     SectionEntry* entry = FindEntry(c, (uint32_t)sid);
     if (Rd<uint8_t>(c, coaster::OperationMode) != 2 || !entry || !IsScriptedNode(entry->node) ||
-        !SGetI(c, (uint32_t)sid, SG_IS_STATION) || Rd<int32_t>(entry->node, node::UserState) != 0x20000003)
+        !SGetI(c, (uint32_t)sid, SG_IS_STATION) || Rd<int32_t>(entry->node, node::UserState) != 0x20000004)
       return fail("Panel session requires a scripted station block");
     if (!g_sessions.claim(ci, (uintptr_t)c, (uint32_t)sid, (uintptr_t)client,
                           suppress != 0, (uint16_t)port, GetTickCount64()))
@@ -1035,7 +1035,8 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w, uintptr_t client) {
     else {
       bool operatingPacket=state >= 0x40000000 && state < 0x42000000;
       bool panelPacket = operatingPacket || (state >= 0x50000000 && state < 0x50010000) ||
-                         (state >= 0x51000000 && state < 0x51004000);
+                         (state >= 0x51000000 && state < 0x51004000) ||
+                         (state >= 0x52000000 && state < 0x52004000);
       int panelMode=operatingPacket ? ((state-0x40000000)>>11)&3 : -1;
       if (panelPacket && !g_sessions.input(ci, (uintptr_t)c, (uint32_t)sid,
                                           (uintptr_t)client, GetTickCount64(),panelMode))
@@ -1330,7 +1331,7 @@ static DWORD WINAPI InitThread(LPVOID self) {
   g_trace = GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
   wcscpy(dot, L".log");
   g_log = _wfopen(path, L"a");
-  Log("NL2Bridge 1.2.5 starting (API 10), port %d", g_port);
+  Log("NL2Bridge 1.2.6 starting (API 11), port %d", g_port);
   if (g_trace) Log("TCP diagnostic tracing enabled");
   ResolveAll();
   Log(G.ok ? "all symbols resolved" : "WARNING: some symbols missing - requests will be refused");

@@ -136,7 +136,7 @@ class NL2Bridge:
         return self.call(1000)[0] == R_OK
 
     def bridge_info(self):
-        """{name, api, build} (9 = panel sessions; 10 = manual parameter restoration and controller signature 3). Older bridges answer 'Unknown message' -> {'api': 0}."""
+        """{name, api, build} (9 = sessions; 10 = manual parameters/signature 3; 11 = manual brakes/signature 4). Older bridges answer 'Unknown message' -> {'api': 0}."""
         try:
             return self._json(1001)
         except NL2Error:

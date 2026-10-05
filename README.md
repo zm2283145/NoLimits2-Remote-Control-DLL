@@ -43,6 +43,7 @@ The bridge stays loaded until the game exits. To load a different build in the s
 
 ### Port and network
 - Default port **15152**. Put a text file `<dll name>.port` containing another port number next to the DLL to change it.
+- For temporary TCP diagnostics, create an empty `<dll name>.trace` file next to the DLL before injection. The log then includes receive sizes, query/request IDs, reply sizes and handler duration. Remove the file and restart the game to disable tracing. Game refusal reasons are logged even without tracing.
 - The bridge listens on all network interfaces so panels can run on other PCs. It has **no authentication**: only allow the port through the firewall on a trusted private network (see [Running the panel on a different PC](docs/CONTROLLER.md#running-the-panel-on-a-different-pc)).
 
 ## Programming against it
@@ -80,6 +81,15 @@ See [docs/CONTROLLER.md](docs/CONTROLLER.md).
 - Windows 10/11 x64. The Python tools need Python 3.8+ (tkinter for the GUIs).
 
 ## Building
+
+Version **1.2.1** keeps API 8 and all ride-command behavior. Replies now retry partial socket writes until the complete frame is sent, or close the connection on failure. This prevents truncated frames under socket backpressure. Optional tracing helps distinguish transport failures from game refusals. No game offsets or control logic changed.
+
+The portable transport regression test covers fragmented writes of a maximum-size frame, failures after partial progress, zero-byte sends, and empty output:
+
+```powershell
+g++ -std=c++17 -static -o dist/send_all_test.exe tests/send_all_test.cpp
+dist/send_all_test.exe
+```
 MinGW-w64 (for example MSYS2 `mingw-w64-x86_64-gcc`):
 ```
 g++ -O2 -std=c++17 -shared -static -o NL2Bridge.dll src/nl2bridge.cpp -lws2_32 -lpsapi

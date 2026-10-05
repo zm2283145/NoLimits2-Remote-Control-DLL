@@ -22,12 +22,14 @@
 #include <atomic>
 #include <algorithm>
 #include "offsets.h"
+#include "send_all.h"
 #undef R_OK   // io.h access() flag, clashes with the reply id below
 
 using namespace nl2;
 
 // ---------------------------------------------------------------- logging
 static FILE* g_log = nullptr;
+static bool g_trace = false;
 static void Log(const char* fmt, ...) {
   if (!g_log) return;
   SYSTEMTIME st; GetLocalTime(&st);
@@ -608,7 +610,7 @@ static uint16_t Handle(uint16_t id, Reader& r, Writer& w) {
   case Q_PING: return R_OK;
 
   case Q_BRIDGE_INFO:
-    w.str("{\"name\":\"NL2Bridge\",\"api\":8,\"build\":\"1.2.0\"}");
+    w.str("{\"name\":\"NL2Bridge\",\"api\":8,\"build\":\"1.2.1\"}");
     return R_STRING;
 
   case Q_DEVICE_PARAMS_GET: {
@@ -1042,6 +1044,7 @@ static DWORD WINAPI ClientThread(LPVOID p) {
   std::vector<uint8_t> in; uint8_t buf[4096];
   while (g_run) {
     int n = recv(s, (char*)buf, sizeof buf, 0);
+    if (g_trace) Log("tcp socket=%llu recv=%d", (unsigned long long)s, n);
     if (n <= 0) break;
     in.insert(in.end(), buf, buf + n);
     std::vector<uint8_t> out;
@@ -1054,12 +1057,21 @@ static DWORD WINAPI ClientThread(LPVOID p) {
       if (in[9 + sz] != 'L') { in.clear(); break; }
       Reader r{in.data() + 9, sz};
       Writer w;
+      const ULONGLONG started = GetTickCount64();
       uint16_t rid = Handle(id, r, w);
+      if (g_trace) Log("tcp socket=%llu query=%u request=%u bytes=%u reply=%u replyBytes=%zu ms=%llu",
+        (unsigned long long)s, id, req, sz, rid, w.b.size(), (unsigned long long)(GetTickCount64()-started));
+      if (rid == R_ERROR) Log("query %u error: %.*s", id, (int)w.b.size(), (const char*)w.b.data());
       if (w.b.size() > 0xffff) { w.b.clear(); w.str("Reply larger than 64 KB - use the per-part queries"); rid = R_ERROR; }
       Frame(out, rid, req, w.b);
       in.erase(in.begin(), in.begin() + 10 + sz);
     }
-    if (!out.empty() && send(s, (const char*)out.data(), (int)out.size(), 0) <= 0) break;
+    if (!SendAll(out.data(), out.size(), [s](const uint8_t* data, int size) {
+      return send(s, (const char*)data, size, 0);
+    })) {
+      Log("tcp send failed socket=%llu error=%d", (unsigned long long)s, WSAGetLastError());
+      break;
+    }
   }
   closesocket(s);
   return 0;
@@ -1094,9 +1106,12 @@ static DWORD WINAPI InitThread(LPVOID self) {
   wchar_t* dot = wcsrchr(path, L'.'); if (!dot) dot = path + wcslen(path);
   wcscpy(dot, L".port");
   if (FILE* pf = _wfopen(path, L"r")) { int p = 0; if (fscanf(pf, "%d", &p) == 1 && p > 0 && p < 65536) g_port = p; fclose(pf); }
+  wcscpy(dot, L".trace");
+  g_trace = GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
   wcscpy(dot, L".log");
   g_log = _wfopen(path, L"a");
-  Log("NL2Bridge 1.2.0 starting (API 8), port %d", g_port);
+  Log("NL2Bridge 1.2.1 starting (API 8), port %d", g_port);
+  if (g_trace) Log("TCP diagnostic tracing enabled");
   ResolveAll();
   Log(G.ok ? "all symbols resolved" : "WARNING: some symbols missing - requests will be refused");
   InitSensors(G.sensorSyms);
